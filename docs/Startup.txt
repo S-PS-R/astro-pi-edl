@@ -1,0 +1,28 @@
+How to setup the Raspberry PI
+
+1. Install Raspberry PI OS 64-Bit
+2. Run the following functions in order
+
+sudo apt update
+sudo apt full-upgrade -y
+sudo reboot
+sudo apt install code git python3-venv -y
+sudo apt install sense-hat -y
+
+3. To verify tool installation run the following
+
+code --version
+git --version
+python3 --version
+
+4. Create Projects folder and initialize git
+
+cd ~/Projects
+mkdir -p astro-pi-edl/{data,docs,logs,src,tests}
+cd astro-pi-edl
+touch data/.gitkeep
+touch logs/.gitkeep
+touch README.md
+touch requirements.txt
+touch .gitignore
+git init
