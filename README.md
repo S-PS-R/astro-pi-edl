@@ -1,35 +1,47 @@
 # EDL flight computer
 
-Raspberry Pi 5 + Sense HAT V2 as the C&DH box for the Group 4 EDL demo.
+Pi 5 + Sense HAT V2 for the Group 4 C&DH demo.
 
 ```bash
-PYTHONPATH=src python3 -m edl_flight_computer.demo      # sequenced EDL run
-PYTHONPATH=src python3 -m edl_flight_computer.record    # 50 Hz telemetry to CSV (+ PNG)
-PYTHONPATH=src python3 -m edl_flight_computer.plot      # graph an existing CSV
+PYTHONPATH=src python3 -m edl_flight_computer.demo
+PYTHONPATH=src python3 -m edl_flight_computer.record
+PYTHONPATH=src python3 -m edl_flight_computer.plot
 ```
 
-`record` writes `logs/edl_log.csv` on the Pi. UDP to a laptop is optional (`EDL_LOG_UDP=0` to disable). Set `EDL_COMMS_HOST` if you need unicast.
+`demo` walks the EDL timeline. `record` logs at 50 Hz to `logs/edl_log.csv` (and a PNG if matplotlib is installed). `plot` graphs an existing CSV.
 
-On the Pi: `sudo apt install sense-hat python3-matplotlib` and enable I2C. Without the HAT the stack uses the built-in simulator.
+UDP off the Pi is optional. Set `EDL_LOG_UDP=0` to keep the file local. Set `EDL_COMMS_HOST` for unicast instead of broadcast.
 
-Mission-specific timeline goes in `src/edl_flight_computer/sequence.py` (`DEFAULT_PHASES`).
+On the Pi install `sense-hat` and `python3-matplotlib` and turn on I2C. On a laptop with no HAT, the code uses the built-in simulator.
 
-## Files
+Phase names and order live in `src/edl_flight_computer/sequence.py` (`DEFAULT_PHASES`). Change that list when the mission profile is locked.
 
-All under `src/edl_flight_computer/`. Python runs on the Pi 5. The Sense HAT is only a peripheral on the 40-pin header.
+## What each file does
 
-| File | Function | Hardware |
-|---|---|
-| `hat.py` | One shared HAT handle; simulator if I2C is missing | Sense HAT I2C / LED driver |
-| `sensors.py` | `read_temperature()`, `read_acceleration()`, `read_pressure()` | HTS221, LSM9DS1, LPS25HB |
-| `gpio_io.py` | Event discretes and joystick read | LED matrix columns 0-7; HAT joystick |
-| `sequence.py` | EDL phase timeline (`start_edl`, `advance_phase`) | None (software clock) |
-| `display.py` | Live status line + phase color on the matrix | Pi HDMI + 8x8 LEDs |
-| `landing.py` | Touchdown flag from IMU |a| | LSM9DS1 accel |
-| `comms.py` | Touchdown packet (`send_landing_message`) | Pi 5 Wi-Fi (UDP :5770) |
-| `log.py` | Append CSV rows; optional UDP stream | microSD (`logs/edl_log.csv`) |
-| `record.py` | 50 Hz free-flight capture + PNG | Same sensors as `sensors.py` |
-| `plot.py` | Graph a CSV to PNG | None (writes `logs/edl_log.png`) |
-| `faults.py` | Safe mode: drop chute/engine, assert safe | LED columns |
-| `demo.py` | Walk the EDL sequence end to end | All of the above |
-| `__init__.py` | Public imports | None |
+Code is in `src/edl_flight_computer/`. It runs on the Pi. The HAT sits on the 40-pin header.
+
+**hat.py** — Opens the Sense HAT. If I2C is missing, it pretends to be the HAT so the rest of the stack still runs.
+
+**sensors.py** — Board temperature (HTS221), accel in g (LSM9DS1), pressure in mbar (LPS25HB).
+
+**gpio_io.py** — Treats LED-matrix columns as event lines (parachute, descent engine, heatshield, safe). Joystick is the discrete input.
+
+**sequence.py** — Phase clock: `start_edl()`, `advance_phase()`. No hardware.
+
+**display.py** — One status line on HDMI and a phase color on the 8×8 matrix.
+
+**landing.py** — Touchdown if IMU |a| crosses `TOUCHDOWN_G`.
+
+**comms.py** — Sends the touchdown string over Wi-Fi UDP (port 5770).
+
+**log.py** — Appends rows to `logs/edl_log.csv`. Can also stream those rows over UDP.
+
+**record.py** — High-rate capture for a toss / drop. Writes the CSV and tries to make the PNG.
+
+**plot.py** — Draws accel, temperature, and pressure from a CSV.
+
+**faults.py** — Safe mode: drop chute and engine columns, light the safe column.
+
+**demo.py** — Runs the sequence end to end.
+
+**__init__.py** — Re-exports the functions the other modules call.
