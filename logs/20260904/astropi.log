@@ -1,0 +1,11 @@
+Today I performed the first calibration of the sensors on the Astro Pi.
+Calibration was saved to /etc/RTIMULib.ini on the PI itself
+
+The script I created for this are under tools/calibration/calibration.py
+This script uses the offical Pi Sense HAT method for calibration.
+
+I also merged Quincy's code fort the src/edl_flight_computer python files
+I modified them so that importing the edl_flight_computer module works the directory not just terminal command
+You can run it from here now python -m src.edl_flight_computer.demo
+
+I now allowed log and data files to be uploaded to github, I can't imagine the files will be too large since microSD card space is limited.

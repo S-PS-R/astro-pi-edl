@@ -2,17 +2,8 @@
 __pycache__/
 *.pyc
 
-
 # VS Code
 .vscode/
-
-# Logs and generated data
-logs/*
-data/*
-
-# Keep empty folders
-!logs/.gitkeep
-!data/.gitkeep
 
 # OS files
 .DS_Store.venv/
