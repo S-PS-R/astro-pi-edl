@@ -1,1 +1,8 @@
+Terminal
 sudo shutdown -h now
+
+VS CODE:
+code .
+git add .
+git commit -m "Message"
+git push

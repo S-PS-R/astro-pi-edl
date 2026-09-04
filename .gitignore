@@ -15,4 +15,4 @@ data/*
 !data/.gitkeep
 
 # OS files
-.DS_Store
+.DS_Store.venv/

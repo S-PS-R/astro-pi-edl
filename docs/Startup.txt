@@ -26,3 +26,12 @@ touch README.md
 touch requirements.txt
 touch .gitignore
 git init
+
+
+5. Install calibration dependency
+
+sudo apt install octave -y
+cd ~
+cp /usr/share/librtimulib-utils/RTEllipsoidFit ./ -a
+cd RTEllipsoidFit
+RTIMULibCal
