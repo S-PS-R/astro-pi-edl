@@ -35,3 +35,6 @@ cd ~
 cp /usr/share/librtimulib-utils/RTEllipsoidFit ./ -a
 cd RTEllipsoidFit
 RTIMULibCal
+
+6. Install matplotlib
+pip install matplotlib

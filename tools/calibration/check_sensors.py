@@ -10,6 +10,16 @@ import time
 import os
 import math
 
+# LED colors to cycle through each time the monitor is run
+LED_COLORS = [
+    (255, 0, 0),      # Red
+    (0, 255, 0),      # Green
+    (0, 0, 255),      # Blue
+    (255, 255, 0),    # Yellow
+    (255, 0, 255),    # Magenta
+    (0, 255, 255),    # Cyan
+    (255, 255, 255),  # White
+]
 
 def open_monitor_terminal():
     """
@@ -30,6 +40,34 @@ def open_monitor_terminal():
         f"'{python_path}' '{script_path}' --monitor; exec bash"
     ])
 
+def get_next_led_color():
+    """
+    Get the next LED color in the sequence.
+
+    The current color index is stored in a small file so that each time
+    the program runs it moves to the next color.
+    """
+
+    config_dir = Path.home() / ".config" / "astro-pi-edl"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    color_file = config_dir / "sensor_monitor_color.txt"
+
+    # Default to the first color
+    color_index = 0
+
+    if color_file.exists():
+        try:
+            previous_index = int(color_file.read_text().strip())
+            color_index = (previous_index + 1) % len(LED_COLORS)
+        except ValueError:
+            color_index = 0
+
+    # Save the current index for the next run
+    color_file.write_text(str(color_index))
+
+    return LED_COLORS[color_index]
+
 
 def monitor_sensors():
     """Continuously display Sense HAT sensor readings."""
@@ -40,7 +78,14 @@ def monitor_sensors():
     try:
         while True:
 
+            # Choose a different LED color for this run
+            led_color = get_next_led_color()
 
+            # Turn the entire 8x8 LED matrix on
+            sense.clear(*led_color)
+
+            print(f"LED color for this run: RGB{led_color}")
+            
             # Environmental sensors
             print("\n===== ENVIRONMENTAL SENSORS =====")
 

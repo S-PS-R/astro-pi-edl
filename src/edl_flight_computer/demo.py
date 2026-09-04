@@ -2,24 +2,77 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from time import sleep
 
-from .comms import send_landing_message
-from .display import render
-from .faults import Fault, active_fault, handle_fault, inject_fault
-from .gpio_io import (
-    PIN_DESCENT_ENGINE,
-    PIN_JOY_CENTER,
-    PIN_PARACHUTE,
-    PIN_SAFE,
-    pulse,
-    read_input,
-    set_output,
-)
-from .hat import is_simulated
-from .landing import accel_magnitude, detect_touchdown
-from .sensors import read_acceleration, read_pressure, read_temperature
-from .sequence import advance_phase, phase_elapsed, start_edl
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from edl_flight_computer.comms import send_landing_message
+    from edl_flight_computer.display import render
+    from edl_flight_computer.faults import Fault, active_fault, handle_fault, inject_fault
+    from edl_flight_computer.gpio_io import (
+            PIN_DESCENT_ENGINE,
+            PIN_JOY_CENTER,
+            PIN_PARACHUTE,
+            PIN_SAFE,
+            pulse,
+            read_input,
+            set_output,
+        )
+    from edl_flight_computer.hat import is_simulated
+    from edl_flight_computer.landing import accel_magnitude, detect_touchdown
+    from edl_flight_computer.sensors import read_acceleration, read_pressure, read_temperature
+    from edl_flight_computer.sequence import advance_phase, phase_elapsed, start_edl
+    from edl_flight_computer.comms import send_landing_message
+    from edl_flight_computer.display import render
+    from edl_flight_computer.faults import Fault, active_fault, handle_fault, inject_fault
+    from edl_flight_computer.gpio_io import (
+        PIN_DESCENT_ENGINE,
+        PIN_JOY_CENTER,
+        PIN_PARACHUTE,
+        PIN_SAFE,
+        pulse,
+        read_input,
+        set_output,
+    )
+    from edl_flight_computer.hat import is_simulated
+    from edl_flight_computer.landing import accel_magnitude, detect_touchdown
+    from edl_flight_computer.sensors import read_acceleration, read_pressure, read_temperature
+    from edl_flight_computer.sequence import advance_phase, phase_elapsed, start_edl
+else:
+    from .comms import send_landing_message
+    from .display import render
+    from .faults import Fault, active_fault, handle_fault, inject_fault
+    from .gpio_io import (
+        PIN_DESCENT_ENGINE,
+        PIN_JOY_CENTER,
+        PIN_PARACHUTE,
+        PIN_SAFE,
+        pulse,
+        read_input,
+        set_output,
+    )
+    from .hat import is_simulated
+    from .landing import accel_magnitude, detect_touchdown
+    from .sensors import read_acceleration, read_pressure, read_temperature
+    from .sequence import advance_phase, phase_elapsed, start_edl
+    from .comms import send_landing_message
+    from .display import render
+    from .faults import Fault, active_fault, handle_fault, inject_fault
+    from .gpio_io import (
+        PIN_DESCENT_ENGINE,
+        PIN_JOY_CENTER,
+        PIN_PARACHUTE,
+        PIN_SAFE,
+        pulse,
+        read_input,
+        set_output,
+    )
+    from .hat import is_simulated
+    from .landing import accel_magnitude, detect_touchdown
+    from .sensors import read_acceleration, read_pressure, read_temperature
+    from .sequence import advance_phase, phase_elapsed, start_edl
 
 PHASE_DWELL_S = 1.5
 _POLL_S = 0.1
