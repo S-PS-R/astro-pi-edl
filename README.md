@@ -8,13 +8,13 @@ PYTHONPATH=src python3 -m edl_flight_computer.record
 PYTHONPATH=src python3 -m edl_flight_computer.plot
 ```
 
-`demo` walks the EDL timeline. `record` logs at 50 Hz to `logs/edl_log.csv` (and a PNG if matplotlib is installed). `plot` graphs an existing CSV.
+`demo` simulates EDL timeline. `record` logs at 50 Hz to `logs/edl_log.csv` (and a PNG if matplotlib is installed). `plot` graphs an existing CSV.
 
 UDP off the Pi is optional. Set `EDL_LOG_UDP=0` to keep the file local. Set `EDL_COMMS_HOST` for unicast instead of broadcast.
 
 On the Pi install `sense-hat` and `python3-matplotlib` and turn on I2C. On a laptop with no HAT, the code uses the built-in simulator.
 
-Phase names and order live in `src/edl_flight_computer/sequence.py` (`DEFAULT_PHASES`). Change that list when the mission profile is locked.
+Phase names and order live in `src/edl_flight_computer/sequence.py` (`DEFAULT_PHASES`). Change that list when the mission profile is defined.
 
 ## What each file does
 
