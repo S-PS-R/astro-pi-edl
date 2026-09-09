@@ -1,4 +1,7 @@
-"""HTS221 humidity/temperature model and a shared rolling-sample helper."""
+"""
+HTS221 humidity/temperature model and a shared rolling-sample helper.
+Author: Samir Rathore
+"""
 
 from collections import deque
 from random import Random
@@ -24,7 +27,7 @@ class SampleChannel:
 
 
 class HumiditySensor:
-    period = 0.13
+    period = 1 / 12.5  # HTS221 maximum continuous output data rate.
 
     def __init__(self, seed, targets):
         self.random = Random(seed)

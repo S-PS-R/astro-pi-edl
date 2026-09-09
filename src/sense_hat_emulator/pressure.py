@@ -1,4 +1,7 @@
-"""LPS25H pressure and its independent temperature channel."""
+"""
+LPS25H pressure and its independent temperature channel.
+Author: Samir Rathore
+"""
 
 from random import Random
 from .humidity import SampleChannel

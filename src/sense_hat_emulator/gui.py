@@ -1,16 +1,22 @@
-"""One-window sensor controls and an API-driven 8x8 RGB display."""
+"""
+One-window sensor controls and an API-driven 8x8 RGB display.
+Author: Samir Rathore
+"""
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from typing import Any
 
 # Preserve direct script launch as well as installed package launch.
 if __package__:
-    from .emulator import SenseEmu
+    from .emulator import SenseEmu, OVR
+    from .imu import GYRO_LIMIT, ACCEL_LIMIT, MAG_LIMIT
 else:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from sense_hat_emulator.emulator import SenseEmu
+    from sense_hat_emulator.emulator import SenseEmu, OVR
+    from sense_hat_emulator.imu import GYRO_LIMIT, ACCEL_LIMIT, MAG_LIMIT
 
 
 class GuiBinding:
@@ -26,27 +32,25 @@ class GuiBinding:
     def _on_change(self, key, variable):
         def changed(*_args):
             if not self.refreshing and self.sense.mode != 'replay':
-                self.sense._state.update({key: variable.get()})
+                value = variable.get()
+                self.sense._state.update({key: value})
         return changed
 
     def refresh(self):
         readings, pixels = self.sense._state.snapshot()
+        measured = self.sense.get_readings()
         self.refreshing = True
         try:
             for key, variable in self.values.items():
                 value = readings[key]
-                # API values may exceed the initial teaching ranges. Expand the
-                # slider so the GUI represents the actual value, without clipping.
-                slider = getattr(variable, "slider", None)
-                if slider is not None:
-                    low = min(float(slider.cget("from")), value)
-                    high = max(float(slider.cget("to")), value)
-                    slider.configure(from_=low, to=high)
-                    label = getattr(variable, "range_label", None)
-                    if label is not None:
-                        label.configure(text=f"{variable.title} ({low:g} to {high:g})")
+                if value == OVR:
+                    # Sliders display targets; an OVR measured value must never
+                    # move a control to the sentinel.
+                    continue
                 if variable.get() != value:
                     variable.set(value)
+                actual = measured.get(key, value)
+                variable.reading_var.set('OVR' if actual == OVR else f'{actual:.{variable.decimals}f} {variable.unit}')
         finally:
             self.refreshing = False
         if pixels != self.last_pixels:
@@ -60,7 +64,9 @@ def add_sensor(parent, row, title, unit, minimum, maximum, default, decimals=2):
     frame.grid(row=row, column=0, sticky="ew")
     parent.columnconfigure(0, weight=1)
     frame.columnconfigure(0, weight=1)
-    value = tk.DoubleVar(master=parent, value=default)
+    # Tk variables do not declare custom attributes in their type stubs, but we
+    # intentionally attach slider/display metadata for the binding layer.
+    value: Any = tk.DoubleVar(master=parent, value=default)
     reading = tk.StringVar(master=parent)
 
     def update_reading(*_args):
@@ -68,6 +74,9 @@ def add_sensor(parent, row, title, unit, minimum, maximum, default, decimals=2):
 
     value.trace_add("write", update_reading)
     value.title = title
+    value.reading_var = reading
+    value.decimals = decimals
+    value.unit = unit
     value.range_label = ttk.Label(frame, text=f"{title} ({minimum:g} to {maximum:g})")
     value.range_label.grid(row=0, column=0, sticky="w")
     ttk.Label(frame, textvariable=reading, width=12, anchor="e").grid(row=0, column=1)
@@ -115,7 +124,7 @@ class LEDMatrix(ttk.LabelFrame):
 
 
 def build_gui(root, sense=None):
-    """World controls or direct/replay inputs, all connected to one SenseEmu."""
+    """Board sensor inputs connected to one SenseEmu."""
     sense = SenseEmu() if sense is None else sense
     root.title('Sense HAT V2 Emulator')
     root.minsize(900, 550)
@@ -128,14 +137,6 @@ def build_gui(root, sense=None):
 
     toolbar = ttk.Frame(panel)
     toolbar.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 8))
-    selected_mode = tk.StringVar(master=root, value=sense.mode)
-    def select_mode():
-        sense.set_mode(selected_mode.get())
-    ttk.Radiobutton(toolbar, text='World', variable=selected_mode, value='world',
-                    command=select_mode).grid(row=0, column=0)
-    ttk.Radiobutton(toolbar, text='Direct inputs', variable=selected_mode, value='direct',
-                    command=select_mode).grid(row=0, column=1)
-
     def load_recording():
         path = filedialog.askopenfilename(parent=root, title='Load sensor recording',
                                          filetypes=[('Sensor CSV', '*.csv'), ('All files', '*.*')])
@@ -165,13 +166,9 @@ def build_gui(root, sense=None):
     left.columnconfigure(0, weight=1)
     matrix = LEDMatrix(left)
     matrix.grid(row=0, column=0, sticky='ew')
-    readouts = ttk.LabelFrame(left, text='Orientation / gyro output', padding=6)
-    readouts.grid(row=1, column=0, sticky='ew', pady=(8, 0))
-    orientation_text = tk.StringVar(master=root)
-    ttk.Label(readouts, textvariable=orientation_text, wraplength=230).grid(row=0, column=0, sticky='w')
     root.controls_area = ttk.Frame(left, height=30)
-    root.controls_area.grid(row=2, column=0, sticky='nsew')
-    left.rowconfigure(2, weight=1)
+    root.controls_area.grid(row=1, column=0, sticky='nsew')
+    left.rowconfigure(1, weight=1)
 
     sensors = ttk.Frame(panel)
     sensors.grid(row=1, column=1, sticky='nsew')
@@ -179,7 +176,6 @@ def build_gui(root, sense=None):
         sensors.columnconfigure(index, weight=1, uniform='groups')
         sensors.rowconfigure(index, weight=1)
     values = {}
-    world_groups, direct_groups = [], []
 
     def add_group(row, column, title, settings):
         group = ttk.LabelFrame(sensors, text=title, padding=3)
@@ -195,21 +191,14 @@ def build_gui(root, sense=None):
         ('humidity', 'Humidity', '%', 0, 100, 0.0, 1),
     ])
     for row, column, title, prefix, unit, low, high, initial in [
-        (0, 1, 'World magnetic field', 'world_mag', 'µT', -100, 100, (33, 0, 0)),
-        (1, 0, 'World acceleration input', 'world_accel', 'g', -8, 8, (0, 0, 1)),
-        (0, 1, 'Board magnetic field', 'mag', 'µT', -100, 100, (33, 0, 0)),
-        (1, 0, 'Board acceleration', 'accel', 'g', -8, 8, (0, 0, 1)),
-        (1, 1, 'Board gyroscope', 'gyro', 'rad/s', -9, 9, (0, 0, 0)),
+        (0, 1, 'Board magnetic field', 'mag', 'µT', -MAG_LIMIT, MAG_LIMIT, (33, 0, 0)),
+        (1, 0, 'Board acceleration', 'accel', 'g', -ACCEL_LIMIT, ACCEL_LIMIT, (0, 0, 1)),
+        (1, 1, 'Board gyroscope', 'gyro', 'rad/s', -GYRO_LIMIT, GYRO_LIMIT, (0, 0, 0)),
     ]:
         group = add_group(row, column, title, [
-            (f'{prefix}_{axis}', axis.upper(), unit, low, high, default, 2)
+            (f'{prefix}_{axis}', axis.upper(), unit, low, high, default, 4 if prefix in ('accel', 'gyro') else 2)
             for axis, default in zip('xyz', initial)
         ])
-        (world_groups if prefix.startswith('world_') else direct_groups).append(group)
-    world_groups.append(add_group(1, 1, 'Commanded orientation', [
-        (axis, axis.title(), '°', -180, 180, 0, 1) for axis in ('roll', 'pitch', 'yaw')
-    ]))
-
     binding = GuiBinding(sense, values, matrix.display_pixels)
     noise_enabled = tk.BooleanVar(master=root, value=sense.noise)
     ttk.Checkbutton(panel, text='Sensor noise', variable=noise_enabled,
@@ -227,12 +216,7 @@ def build_gui(root, sense=None):
         nonlocal timer
         binding.refresh()
         mode = sense.mode
-        selected_mode.set(mode)
         noise_enabled.set(sense.noise)
-        for group in world_groups:
-            group.grid() if mode == 'world' else group.grid_remove()
-        for group in direct_groups:
-            group.grid_remove() if mode == 'world' else group.grid()
         for variable in values.values():
             variable.slider.state(['disabled'] if mode == 'replay' else ['!disabled'])
         status = sense.get_replay_status()
@@ -244,18 +228,8 @@ def build_gui(root, sense=None):
             phase = 'Finished — holding last sample' if status['finished'] else 'Paused' if status['paused'] else 'Playing'
             status_text.set(f"CSV: {phase} | {status['time_s']:.3f} s | row {status['sample']+1}/{status['samples']} | "
                             f"noise {'ON' if sense.noise else 'OFF'}")
-        elif mode == 'world':
-            status_text.set('World vectors rotate into board axes. Orientation changes generate gyro rates. Sliders set targets.')
         else:
-            status_text.set('Direct board-axis inputs bypass world rotation. Orientation remains explicitly commanded.')
-        try:
-            angles = sense.get_orientation_degrees()
-            text = '\n'.join(f'{axis.title()}: {angles[axis]:.1f}°' for axis in ('pitch', 'roll', 'yaw'))
-        except ValueError:
-            text = 'Orientation unavailable\nCSV has no angle columns'
-        gyro = sense.get_gyroscope_raw()
-        text += '\n\nGyro (rad/s)\n' + '\n'.join(f'{axis.upper()}: {gyro[axis]:.4f}' for axis in 'xyz')
-        orientation_text.set(text)
+            status_text.set('Board-axis sensor targets. Gyro controls show radians per second.')
         timer = root.after(33, refresh)
 
     def on_destroy(event):

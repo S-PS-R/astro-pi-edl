@@ -15,6 +15,7 @@ import argparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from edl_flight_computer.hat import get_hat, is_simulated
+OVR = -1e6
 
 # Advance once per sensor sample; restart at red when the process starts.
 LED_COLORS = [
@@ -92,8 +93,13 @@ def get_next_led_color():
 
 def print_readings(sense):
     """Print one sample and advance the LEDs on each sensor update."""
-    led_color = get_next_led_color()
-    sense.clear(*led_color)
+    csv_leds = (getattr(sense, 'mode', None) == 'replay'
+                and sense.get_replay_status()['controls_leds'])
+    if csv_leds:
+        led_color = tuple(sense.get_pixel(0, 0))
+    else:
+        led_color = get_next_led_color()
+        sense.clear(*led_color)
     print(f"LED color: RGB{led_color}")
     # Environmental sensors
     print("\n===== ENVIRONMENTAL SENSORS =====")
@@ -101,54 +107,49 @@ def print_readings(sense):
     temperature = sense.get_temperature()
     pressure = sense.get_pressure()
     humidity = sense.get_humidity()
-    print(f"Temperature (humidity sensor): {temperature:.2f} C")
-    print(f"Temperature (pressure sensor): {sense.get_temperature_from_pressure():.2f} C")
-    print(f"Pressure:    {pressure:.2f} hPa")
-    print(f"Humidity:    {humidity:.1f} %")
+    def show(value, fmt, unit):
+        return 'OVR' if value == OVR else format(value, fmt) + unit
+    print(f"Temperature (humidity sensor): {show(temperature, '.2f', ' C')}")
+    print(f"Temperature (pressure sensor): {show(sense.get_temperature_from_pressure(), '.2f', ' C')}")
+    print(f"Pressure:    {show(pressure, '.2f', ' hPa')}")
+    print(f"Humidity:    {show(humidity, '.1f', ' %')}")
 
     # Accelerometer
     print("\n===== ACCELEROMETER =====")
 
     acceleration = sense.get_accelerometer_raw()
     print(
-        f"x = {acceleration['x']:.2f} g, "
-        f"y = {acceleration['y']:.2f} g, "
-        f"z = {acceleration['z']:.2f} g"
+        f"x = {show(acceleration['x'], '.4f', ' g')}, "
+        f"y = {show(acceleration['y'], '.4f', ' g')}, "
+        f"z = {show(acceleration['z'], '.4f', ' g')}"
     )
-    accel_magnitude = math.sqrt(
-        acceleration["x"] ** 2
-        + acceleration["y"] ** 2
-        + acceleration["z"] ** 2
-    )
-    print(f"Total acceleration: {accel_magnitude:.2f} g")
+    if any(value == OVR for value in acceleration.values()):
+        print("Total acceleration: OVR")
+    else:
+        accel_magnitude = math.sqrt(
+            acceleration["x"] ** 2
+            + acceleration["y"] ** 2
+            + acceleration["z"] ** 2
+        )
+        print(f"Total acceleration: {accel_magnitude:.2f} g")
 
     # Gyroscope
     print("\n===== GYROSCOPE =====")
     gyro = sense.get_gyroscope_raw()
     print(
-        f"x = {gyro['x']:.2f}, "
-        f"y = {gyro['y']:.2f}, "
-        f"z = {gyro['z']:.2f}"
+        f"x = {show(gyro['x'], '.4f', ' rad/s')}, "
+        f"y = {show(gyro['y'], '.4f', ' rad/s')}, "
+        f"z = {show(gyro['z'], '.4f', ' rad/s')}"
     )
 
     # Magnetometer
     print("\n===== MAGNETOMETER =====")
     magnetometer = sense.get_compass_raw()
     print(
-        f"x = {magnetometer['x']:.2f}, "
-        f"y = {magnetometer['y']:.2f}, "
-        f"z = {magnetometer['z']:.2f}"
+        f"x = {show(magnetometer['x'], '.2f', '')}, "
+        f"y = {show(magnetometer['y'], '.2f', '')}, "
+        f"z = {show(magnetometer['z'], '.2f', '')}"
     )
-
-    # Orientation
-    print("\n===== ORIENTATION =====")
-    try:
-        orientation = sense.get_orientation_degrees()
-        print(f"Pitch: {orientation['pitch']:.2f} deg")
-        print(f"Roll:  {orientation['roll']:.2f} deg")
-        print(f"Yaw:   {orientation['yaw']:.2f} deg")
-    except ValueError as exc:
-        print(f"Orientation unavailable: {exc}")
 
     print("\nPress Ctrl+C or close the emulator window to stop\n")
 
@@ -161,7 +162,7 @@ def monitor_sensors(noise=True, seed=None, csv_path=None, replay_noise=False):
     simulated = is_simulated()
     print(f"Sensor source: {'SenseEmu (simulated)' if simulated else 'Sense HAT (hardware)'}")
     if simulated:
-        print("Orientation is commanded (or supplied by CSV); world mode generates raw IMU readings.")
+        print("Raw sensor inputs are independent; calculate orientation in your flight code.")
     try:
         if simulated:
             # Tk stays on the main thread. Timer callbacks keep monitoring and

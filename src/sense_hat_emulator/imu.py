@@ -1,22 +1,31 @@
-"""Independent X/Y/Z IMU noise, in public API units: g, rad/s, and µT."""
+"""
+Independent X/Y/Z IMU noise, in public API units: g, rad/s, and µT.
+Author: Samir Rathore
+"""
 
-from math import radians, sin, cos
+from math import radians
 from random import Random
 from .humidity import SampleChannel
 
+# LSM9DS1 maximum full-scale settings; datasheet Table 3 sensitivities.
+ACCEL_LIMIT = 16.0
+MAG_LIMIT = 1600.0  # 16 gauss, expressed in microtesla
+GYRO_LIMIT = radians(2000)
 
 class IMUSensor:
-    period = 0.016
+    """LSM9DS1 accelerometer and gyro at their maximum normal-mode ODR."""
+    period = 1 / 952
+    specifications = (
+        ('accel', -ACCEL_LIMIT, ACCEL_LIMIT, 1 / 0.000732, 0.1),
+        ('gyro', -GYRO_LIMIT, GYRO_LIMIT, 1 / radians(0.070), radians(1)),
+    )
 
     def __init__(self, seed, targets):
         self.random = Random(seed)
         self.channels = {}
-        # Convert upstream degree/s and gauss parameters to rad/s and µT.
-        for prefix, low, high, factor, error in [
-            ('accel', -8, 8, 4081.6327, 0.1),
-            ('gyro', -radians(500), radians(500), 57.142857 * 180 / 3.141592653589793, radians(1)),
-            ('mag', -400, 400, 7142.8571 / 100, 200.0),
-        ]:
+        # Maximum-range sensitivities: 0.732 mg, 70 mdps, 0.58 mgauss per LSB.
+        # Preserve the existing synthetic noise parameters.
+        for prefix, low, high, factor, error in self.specifications:
             for axis in 'xyz':
                 key = f'{prefix}_{axis}'
                 self.channels[key] = (SampleChannel(targets[key], 10, low, high, factor), error)
@@ -26,26 +35,7 @@ class IMUSensor:
                 for key, (channel, error) in self.channels.items()}
 
 
-
-def rotate_to_board(vector, roll, pitch, yaw):
-    """R.T @ vector, using the official emulator's Rz(yaw) Ry(pitch) Rx(roll)."""
-    x, y, z = map(radians, (roll, pitch, yaw))
-    c1, c2, c3 = cos(z), cos(y), cos(x)
-    s1, s2, s3 = sin(z), sin(y), sin(x)
-    rotation = (
-        (c1*c2, c1*s2*s3-c3*s1, s1*s3+c1*c3*s2),
-        (c2*s1, c1*c3+s1*s2*s3, c3*s1*s2-c1*s3),
-        (-s2, c2*s3, c2*c3),
-    )
-    return tuple(sum(rotation[row][column]*vector[row] for row in range(3))
-                 for column in range(3))
-
-
-def orientation_rates(previous, current, seconds):
-    """Official-style Euler differences, converted to rad/s.
-
-    Wrap differences to the shortest signed angle so 179 -> -179 is +2 degrees.
-    This approximates gyro rates; it is not a general body-rate transformation.
-    """
-    return tuple(radians((new-old+180) % 360-180) / seconds
-                 for old, new in zip(previous, current))
+class MagnetometerSensor(IMUSensor):
+    """Independent magnetic clock; highest standard ODR with FAST_ODR off."""
+    period = 1 / 80
+    specifications = (('mag', -MAG_LIMIT, MAG_LIMIT, 1 / 0.058, 200.0),)

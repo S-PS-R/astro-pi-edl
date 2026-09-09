@@ -1,32 +1,48 @@
-"""SenseEmu and its sensor/LED storage. No GUI is needed to use this class."""
+"""
+SenseEmu and its sensor/LED storage. No GUI is needed to use this class.
+Author: Samir Rathore
+"""
 
 from collections.abc import Mapping
 
-from math import isfinite, radians, ceil
+from math import isfinite, ceil
 from random import Random
 from secrets import randbits
 from time import monotonic
 from .humidity import HumiditySensor
 from .pressure import PressureSensor
-from .imu import IMUSensor, rotate_to_board, orientation_rates
+from .imu import IMUSensor, MagnetometerSensor
 import csv
 from pathlib import Path
 from numbers import Real
 from threading import RLock
 
-ANGLES = ('roll', 'pitch', 'yaw')
 ENVIRONMENT = ('temperature_humidity', 'temperature_pressure', 'pressure', 'humidity')
 RAW_IMU = tuple(f'{prefix}_{axis}' for prefix in ('accel', 'gyro', 'mag') for axis in 'xyz')
 CSV_REQUIRED = ('time_s', *ENVIRONMENT, *RAW_IMU)
+CSV_RGB = ('led_r', 'led_g', 'led_b')
+OVR = -1e6
+RANGES = {
+    'temperature': (-40, 120),
+    'temperature_humidity': (-40, 120), 'temperature_pressure': (-30, 105),
+    'pressure': (260, 1260), 'humidity': (0, 100),
+    **{f'accel_{axis}': (-16, 16) for axis in 'xyz'},
+    **{f'gyro_{axis}': (-34.9065850399, 34.9065850399) for axis in 'xyz'},
+    **{f'mag_{axis}': (-1600, 1600) for axis in 'xyz'},
+}
+
+def measured_value(key, value):
+    """Return OVR sentinel for measurements outside the modeled sensor range."""
+    if key == 'pressure' and value == 0:
+        return 0.0
+    limits = RANGES.get(key)
+    return value if limits is None or limits[0] <= value <= limits[1] else OVR
 DEFAULTS = {
     'temperature': 20.0, 'temperature_humidity': 20.0, 'temperature_pressure': 20.0,
     'pressure': 1013.25, 'humidity': 0.0,
     'accel_x': 0.0, 'accel_y': 0.0, 'accel_z': 1.0,
     'mag_x': 33.0, 'mag_y': 0.0, 'mag_z': 0.0,
     'gyro_x': 0.0, 'gyro_y': 0.0, 'gyro_z': 0.0,
-    'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-    'world_accel_x': 0.0, 'world_accel_y': 0.0, 'world_accel_z': 1.0,
-    'world_mag_x': 33.0, 'world_mag_y': 0.0, 'world_mag_z': 0.0,
 }
 
 
@@ -41,13 +57,11 @@ def checked_values(changes):
         value = float(value)
         if not isfinite(value):
             raise ValueError(f'{key} must be finite')
-        if key == 'humidity' and not 0 <= value <= 100:
-            raise ValueError('Humidity must be between 0 and 100 percent')
-        if key == 'pressure' and value <= 0:
-            raise ValueError('Pressure must be positive')
+        if key == 'pressure' and value < 0:
+            raise ValueError('Pressure cannot be negative')
         if key.startswith('temperature') and value < -273.15:
             raise ValueError('Temperature cannot be below absolute zero')
-        checked[key] = (value+180) % 360-180 if key in ANGLES else value
+        checked[key] = value
     if 'temperature' in checked:
         checked['temperature_humidity'] = checked['temperature']
         checked['temperature_pressure'] = checked['temperature']
@@ -65,12 +79,12 @@ def read_csv_samples(path):
         if len(fields) != len(set(fields)):
             raise ValueError('CSV contains duplicate column names')
         missing = set(CSV_REQUIRED)-set(fields)
-        unknown = set(fields)-set(CSV_REQUIRED)-set(ANGLES)
+        unknown = set(fields)-set(CSV_REQUIRED)-set(CSV_RGB)
         if missing or unknown:
             raise ValueError(f'CSV columns: missing {sorted(missing)}, unknown {sorted(unknown)}')
-        has_orientation = all(key in fields for key in ANGLES)
-        if any(key in fields for key in ANGLES) and not has_orientation:
-            raise ValueError('Include all three roll, pitch, yaw columns or none')
+        has_rgb = all(key in fields for key in CSV_RGB)
+        if any(key in fields for key in CSV_RGB) and not has_rgb:
+            raise ValueError('Include all three led_r, led_g, led_b columns or none')
         for row in reader:
             line = reader.line_num
             try:
@@ -84,19 +98,25 @@ def read_csv_samples(path):
                     raise ValueError('The first time_s must be 0')
                 if samples and time_s <= samples[-1][0]:
                     raise ValueError('time_s must strictly increase')
-                samples.append((time_s, checked_values(values)))
+                colour = None
+                if has_rgb:
+                    channels = [values.pop(key) for key in CSV_RGB]
+                    if any(not isfinite(v) or not v.is_integer() or not 0 <= v <= 255 for v in channels):
+                        raise ValueError('LED RGB channels must be integers from 0 to 255')
+                    colour = validate_colour([int(v) for v in channels])
+                samples.append((time_s, checked_values(values), colour))
             except (ValueError, TypeError) as exc:
                 raise ValueError(f'CSV line {line}: {exc}') from exc
     if not samples:
         raise ValueError('CSV must contain at least one sample')
-    return samples, has_orientation
+    return samples
 
 
 class EmulatorState:
     def __init__(self, noise, seed, realtime):
         self.lock = RLock()
         self.noise, self.seed, self.realtime = noise, seed, realtime
-        self.mode = 'world'
+        self.mode = 'direct'
         self.targets = DEFAULTS.copy()
         self.readings = self.targets.copy()
         self.pixels = [(0, 0, 0)] * 64
@@ -106,46 +126,26 @@ class EmulatorState:
         self.replay_index = 0
         self.replay_paused = False
         self.replay_finished = False
-        self.replay_orientation = True
         self.saved_noise = noise
         self._make_models()
 
-    def _derive_world(self):
-        angles = [self.targets[key] for key in ANGLES]
-        for prefix in ('accel', 'mag'):
-            vector = [self.targets[f'world_{prefix}_{axis}'] for axis in 'xyz']
-            self.targets.update(zip((f'{prefix}_{axis}' for axis in 'xyz'),
-                                    rotate_to_board(vector, *angles)))
-
     def _make_models(self):
-        if self.mode == 'world':
-            self._derive_world()
-            self.targets.update({f'gyro_{axis}': 0.0 for axis in 'xyz'})
         random = Random(self.seed)
         self.models = [model(random.getrandbits(64), self.targets)
-                       for model in (HumiditySensor, PressureSensor, IMUSensor)]
-        self.ticks = [0, 0, 0]
+                       for model in (HumiditySensor, PressureSensor, IMUSensor, MagnetometerSensor)]
+        self.ticks = [0] * len(self.models)
         self.origin = self.elapsed
-        self.previous_orientation = tuple(self.targets[key] for key in ANGLES)
         self.readings = self.targets.copy()
 
     def _sample_to(self, end, before=False):
         for index, model in enumerate(self.models):
             relative = (end-self.origin) / model.period
             due = max(0, ceil(relative-1e-8)-1) if before else int(relative+1e-8)
-            if not self.noise and not (index == 2 and self.mode == 'world'):
+            if not self.noise:
                 self.ticks[index] = due
                 continue
             while self.ticks[index] < due:
-                if index == 2 and self.mode == 'world':
-                    current = tuple(self.targets[key] for key in ANGLES)
-                    rates = orientation_rates(self.previous_orientation, current, model.period)
-                    self.targets.update(zip((f'gyro_{axis}' for axis in 'xyz'), rates))
-                    self.previous_orientation = current
-                if self.noise:
-                    self.readings.update(model.sample(self.targets))
-                else:
-                    self.readings.update({key: self.targets[key] for key in RAW_IMU})
+                self.readings.update(model.sample(self.targets))
                 self.ticks[index] += 1
         if not self.noise:
             self.readings.update(self.targets)
@@ -157,10 +157,12 @@ class EmulatorState:
                 return
             end = min(end, self.replay[-1][0])
             while self.replay_index+1 < len(self.replay) and self.replay[self.replay_index+1][0] <= end+1e-10:
-                time_s, row = self.replay[self.replay_index+1]
+                time_s, row, colour = self.replay[self.replay_index+1]
                 # At an exact boundary, apply the new CSV row before its sensor tick.
                 self._sample_to(time_s, before=True)
                 self.targets.update(row)
+                if colour is not None:
+                    self.pixels = [colour] * 64
                 if not self.noise:
                     self.readings.update(row)
                 self.replay_index += 1
@@ -188,18 +190,7 @@ class EmulatorState:
             self.sync()
             if self.mode == 'replay':
                 raise RuntimeError('Stop CSV replay before changing sensor targets')
-            has_world = any(key.startswith('world_') for key in checked)
-            has_raw = any(key in RAW_IMU for key in checked)
-            if has_world and has_raw:
-                raise ValueError('Do not mix world and raw IMU inputs')
-            new_mode = 'world' if has_world else 'direct' if has_raw else self.mode
-            changed_mode = self.mode != new_mode
-            self.mode = new_mode
             self.targets.update(checked)
-            if self.mode == 'world':
-                self._derive_world()
-            if changed_mode:
-                self._make_models()
             if not self.noise:
                 self.readings.update(self.targets)
 
@@ -207,10 +198,9 @@ class EmulatorState:
         with self.lock:
             if self.mode == 'replay':
                 self.noise = self.saved_noise
-            self.mode = 'world'
+            self.mode = 'direct'
             self.replay = []
             self.replay_paused = self.replay_finished = False
-            self.replay_orientation = True
             self.targets = DEFAULTS.copy()
             self.elapsed = 0.0
             self.wall_last = monotonic()
@@ -265,6 +255,9 @@ class SenseEmu:
     def print_settings(self):
         print(f"[SenseEmu] noise={'ON' if self.noise else 'OFF'} | seed={self.seed} | "
               f"time={'realtime' if self._state.realtime else 'manual'} | mode={self.mode}")
+        print(f'[SenseEmu] model rates: humidity {1/HumiditySensor.period:g} Hz | '
+              f'pressure {1/PressureSensor.period:g} Hz | accel/gyro {1/IMUSensor.period:g} Hz | '
+              f'magnetic {1/MagnetometerSensor.period:g} Hz; exact replay uses CSV timestamps')
 
     def advance(self, seconds):
         """Advance deterministic simulation time; requires realtime=False."""
@@ -285,39 +278,11 @@ class SenseEmu:
     def mode(self):
         return self._state.mode
 
-    def set_mode(self, mode):
-        """Select world/direct controls. CSV replay starts through load_csv()."""
-        if mode not in ('world', 'direct'):
-            raise ValueError('mode must be world or direct')
-        with self._state.lock:
-            self._state.sync()
-            if self.mode == 'replay':
-                self._state.noise = self._state.saved_noise
-            self._state.mode = mode
-            self._state.replay_paused = self._state.replay_finished = False
-            self._state.replay_orientation = True
-            self._state._make_models()
-        self.print_settings()
-
-    def set_orientation(self, roll, pitch, yaw):
-        """Command angles in degrees. In world mode these generate raw IMU inputs."""
-        self._state.update(dict(roll=roll, pitch=pitch, yaw=yaw))
-
-    set_orientation_degrees = set_orientation
-
-    def set_world_acceleration(self, x, y=None, z=None):
-        """World accelerometer-input vector in g (default +Z), not vehicle dynamics."""
-        self._set_vector('world_accel', x, y, z)
-
-    def set_world_magnetic_field(self, x, y=None, z=None):
-        """World magnetic field in µT. Selects world mode."""
-        self._set_vector('world_mag', x, y, z)
-
     def load_csv(self, path, noise=False):
         """Validate and start a recording at time zero; raw sample-hold by default."""
         if type(noise) is not bool:
             raise TypeError('noise must be True or False')
-        samples, orientation = read_csv_samples(path)
+        samples = read_csv_samples(path)
         with self._state.lock:
             state = self._state
             state.sync()
@@ -326,13 +291,14 @@ class SenseEmu:
             state.mode = 'replay'
             state.noise = noise
             state.replay = samples
-            state.replay_orientation = orientation
             state.replay_index = 0
             state.replay_paused = False
             state.replay_finished = len(samples) == 1
             state.elapsed = 0.0
             state.wall_last = monotonic()
             state.targets.update(samples[0][1])
+            if samples[0][2] is not None:
+                state.pixels = [samples[0][2]] * 64
             state._make_models()
         self.print_settings()
 
@@ -361,16 +327,31 @@ class SenseEmu:
             state.replay_paused = False
             state.replay_finished = len(state.replay) == 1
             state.targets.update(state.replay[0][1])
+            if state.replay[0][2] is not None:
+                state.pixels = [state.replay[0][2]] * 64
             state._make_models()
 
     def stop_replay(self):
-        """Return to world mode and restore the noise setting from before replay."""
-        self.set_mode('world')
+        """Return to direct inputs, keeping the last targets and restoring noise."""
+        with self._state.lock:
+            state = self._state
+            if state.mode != 'replay':
+                return
+            state.sync()
+            state.noise = state.saved_noise
+            state.mode = 'direct'
+            state.replay = []
+            state.replay_index = 0
+            state.replay_paused = state.replay_finished = False
+            state.wall_last = monotonic()
+            state._make_models()
+        self.print_settings()
 
     def get_replay_status(self):
         with self._state.lock:
             self._state.sync()
             return dict(active=self.mode == 'replay', time_s=self._state.elapsed,
+                        controls_leds=self.mode == 'replay' and self._state.replay[0][2] is not None,
                         sample=self._state.replay_index,
                         samples=len(self._state.replay),
                         paused=self._state.replay_paused, finished=self._state.replay_finished)
@@ -380,16 +361,12 @@ class SenseEmu:
         with self._state.lock:
             self._state.sync()
             readings = self._state.readings.copy()
-            for key in ANGLES:
-                readings.pop(key, None)
-            if self.mode != 'replay' or self._state.replay_orientation:
-                readings.update({key: self._state.targets[key] for key in ANGLES})
-            return {key: value for key, value in readings.items() if not key.startswith('world_')}
+            return {key: measured_value(key, value) for key, value in readings.items()}
 
     def _get(self, name):
         with self._state.lock:
             self._state.sync()
-            return self._state.readings[name]
+            return measured_value(name, self._state.readings[name])
 
     def _set(self, name, value):
         self._state.update({name: value})
@@ -427,7 +404,8 @@ class SenseEmu:
     def _get_vector(self, prefix):
         with self._state.lock:
             self._state.sync()
-            return {axis: self._state.readings[f"{prefix}_{axis}"] for axis in "xyz"}
+            return {axis: measured_value(f'{prefix}_{axis}', self._state.readings[f'{prefix}_{axis}'])
+                    for axis in "xyz"}
 
     def _set_vector(self, prefix, x, y, z):
         if isinstance(x, Mapping):
@@ -460,24 +438,6 @@ class SenseEmu:
 
     def set_gyroscope_raw(self, x, y=None, z=None):
         self._set_vector("gyro", x, y, z)
-
-    def get_orientation_radians(self):
-        with self._state.lock:
-            self._state.sync()
-            if self.mode == 'replay' and not self._state.replay_orientation:
-                raise ValueError('CSV does not include roll, pitch, yaw')
-            return {key: radians(self._state.targets[key]) for key in ANGLES}
-
-    def get_orientation_degrees(self):
-        with self._state.lock:
-            self._state.sync()
-            if self.mode == 'replay' and not self._state.replay_orientation:
-                raise ValueError('CSV does not include roll, pitch, yaw')
-            return {key: self._state.targets[key] % 360 for key in ANGLES}
-
-    get_orientation = get_orientation_degrees
-    orientation = property(get_orientation_degrees)
-    orientation_radians = property(get_orientation_radians)
 
     # Descriptive emulator aliases; official raw names above remain available.
     get_acceleration = get_accelerometer_raw
