@@ -7,9 +7,16 @@ _hat: Any = None
 _simulated = False
 
 
-def get_hat() -> Any:
+def get_hat(*, noise=True, seed=None, force_emulator=False) -> Any:
     global _hat, _simulated
     if _hat is not None:
+        if force_emulator and not _simulated:
+            raise RuntimeError('Hardware is already in use; start a new process for CSV replay')
+        return _hat
+    if force_emulator:
+        from sense_hat_emulator import SenseEmu
+        _hat = SenseEmu(noise=noise, seed=seed)
+        _simulated = True
         return _hat
     try:
         from sense_hat import SenseHat  # type: ignore
@@ -20,7 +27,7 @@ def get_hat() -> Any:
         print(f"[hat] no Sense HAT ({exc!r}); simulator")
         from sense_hat_emulator import SenseEmu
 
-        _hat = SenseEmu()
+        _hat = SenseEmu(noise=noise, seed=seed)
         _simulated = True
     return _hat
 

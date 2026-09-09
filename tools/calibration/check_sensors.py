@@ -11,6 +11,7 @@ import math
 import shutil
 import shlex
 from itertools import cycle
+import argparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from edl_flight_computer.hat import get_hat, is_simulated
@@ -27,13 +28,21 @@ LED_COLORS = [
 ]
 _led_colors = cycle(LED_COLORS)
 
-def open_monitor_terminal():
+def open_monitor_terminal(noise=True, seed=None, csv_path=None, replay_noise=False):
     """Launch a terminal for this OS, preserving the current Python environment.
 
     --monitor prevents the child from launching another terminal. If launching
     fails or no desktop terminal is available, use the current terminal.
     """
     command = [sys.executable, str(Path(__file__).resolve()), "--monitor"]
+    if not noise:
+        command.append('--no-noise')
+    if seed is not None:
+        command.extend(['--seed', str(seed)])
+    if csv_path is not None:
+        command.extend(['--csv', str(Path(csv_path).resolve())])
+    if replay_noise:
+        command.append('--replay-noise')
     try:
         if sys.platform == "win32":
             # Windows creates a console for the same .venv Python interpreter.
@@ -43,8 +52,7 @@ def open_monitor_terminal():
         if sys.platform == "darwin":
             # Pass the shell command as data, rather than embedding paths in
             # AppleScript. shlex.join quotes spaces and shell metacharacters.
-            script = '''on run argv tell application "Terminal"
-            do script (item 1 of argv)
+            script = '''on run argv tell application "Terminal" do script (item 1 of argv)
             activate end tell end run'''
             subprocess.run(
                 ["osascript", "-e", script, shlex.join(command)],
@@ -74,7 +82,7 @@ def open_monitor_terminal():
         print(f"Could not open a new terminal: {exc}")
 
     print("Using the current terminal for the sensor monitor.")
-    monitor_sensors()
+    monitor_sensors(noise=noise, seed=seed, csv_path=csv_path, replay_noise=replay_noise)
 
 
 def get_next_led_color():
@@ -93,7 +101,8 @@ def print_readings(sense):
     temperature = sense.get_temperature()
     pressure = sense.get_pressure()
     humidity = sense.get_humidity()
-    print(f"Temperature: {temperature:.2f} C")
+    print(f"Temperature (humidity sensor): {temperature:.2f} C")
+    print(f"Temperature (pressure sensor): {sense.get_temperature_from_pressure():.2f} C")
     print(f"Pressure:    {pressure:.2f} hPa")
     print(f"Humidity:    {humidity:.1f} %")
 
@@ -102,52 +111,57 @@ def print_readings(sense):
 
     acceleration = sense.get_accelerometer_raw()
     print(
-        f"x = {acceleration['x']:.4f} g, "
-        f"y = {acceleration['y']:.4f} g, "
-        f"z = {acceleration['z']:.4f} g"
+        f"x = {acceleration['x']:.2f} g, "
+        f"y = {acceleration['y']:.2f} g, "
+        f"z = {acceleration['z']:.2f} g"
     )
     accel_magnitude = math.sqrt(
         acceleration["x"] ** 2
         + acceleration["y"] ** 2
         + acceleration["z"] ** 2
     )
-    print(f"Total acceleration: {accel_magnitude:.4f} g")
+    print(f"Total acceleration: {accel_magnitude:.2f} g")
 
     # Gyroscope
     print("\n===== GYROSCOPE =====")
     gyro = sense.get_gyroscope_raw()
     print(
-        f"x = {gyro['x']:.4f}, "
-        f"y = {gyro['y']:.4f}, "
-        f"z = {gyro['z']:.4f}"
+        f"x = {gyro['x']:.2f}, "
+        f"y = {gyro['y']:.2f}, "
+        f"z = {gyro['z']:.2f}"
     )
 
     # Magnetometer
     print("\n===== MAGNETOMETER =====")
     magnetometer = sense.get_compass_raw()
     print(
-        f"x = {magnetometer['x']:.4f}, "
-        f"y = {magnetometer['y']:.4f}, "
-        f"z = {magnetometer['z']:.4f}"
+        f"x = {magnetometer['x']:.2f}, "
+        f"y = {magnetometer['y']:.2f}, "
+        f"z = {magnetometer['z']:.2f}"
     )
 
     # Orientation
     print("\n===== ORIENTATION =====")
-    orientation = sense.get_orientation_degrees()
-    print(f"Pitch: {orientation['pitch']:.2f} deg")
-    print(f"Roll:  {orientation['roll']:.2f} deg")
-    print(f"Yaw:   {orientation['yaw']:.2f} deg")
+    try:
+        orientation = sense.get_orientation_degrees()
+        print(f"Pitch: {orientation['pitch']:.2f} deg")
+        print(f"Roll:  {orientation['roll']:.2f} deg")
+        print(f"Yaw:   {orientation['yaw']:.2f} deg")
+    except ValueError as exc:
+        print(f"Orientation unavailable: {exc}")
 
     print("\nPress Ctrl+C or close the emulator window to stop\n")
 
 
-def monitor_sensors():
+def monitor_sensors(noise=True, seed=None, csv_path=None, replay_noise=False):
     """Show the emulator automatically, or monitor the real HAT in a loop."""
-    sense = get_hat()
+    sense = get_hat(noise=noise, seed=seed, force_emulator=csv_path is not None)
+    if csv_path is not None:
+        sense.load_csv(csv_path, noise=replay_noise)
     simulated = is_simulated()
     print(f"Sensor source: {'SenseEmu (simulated)' if simulated else 'Sense HAT (hardware)'}")
     if simulated:
-        print("Orientation is a static estimate, not gyro-based sensor fusion.")
+        print("Orientation is commanded (or supplied by CSV); world mode generates raw IMU readings.")
     try:
         if simulated:
             # Tk stays on the main thread. Timer callbacks keep monitoring and
@@ -186,8 +200,16 @@ def monitor_sensors():
 
 
 if __name__ == "__main__":
-
-    if "--monitor" in sys.argv:
-        monitor_sensors()
+    parser = argparse.ArgumentParser(description="Monitor Sense HAT or SenseEmu sensors")
+    parser.add_argument('--monitor', action='store_true', help='Use this terminal')
+    parser.add_argument('--noise', action=argparse.BooleanOptionalAction, default=True,
+                        help='Enable/disable emulator sensor noise (default: enabled)')
+    parser.add_argument('--seed', type=int, help='Emulator random seed')
+    parser.add_argument('--csv', type=Path, help='Replay sensor CSV; always uses the emulator')
+    parser.add_argument('--replay-noise', action='store_true',
+                        help='Add sensor noise to CSV inputs (default: exact replay)')
+    args = parser.parse_args()
+    if args.monitor:
+        monitor_sensors(noise=args.noise, seed=args.seed, csv_path=args.csv, replay_noise=args.replay_noise)
     else:
-        open_monitor_terminal()
+        open_monitor_terminal(noise=args.noise, seed=args.seed, csv_path=args.csv, replay_noise=args.replay_noise)
