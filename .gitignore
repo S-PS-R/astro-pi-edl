@@ -7,3 +7,6 @@ __pycache__/
 
 # OS files
 .DS_Store.venv/
+
+# emulator
+*.egg-info/
