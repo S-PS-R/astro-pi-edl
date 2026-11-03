@@ -1,69 +1,104 @@
-"""HAT sensors: HTS221 temperature, LSM9DS1 IMU, LPS25HB barometer."""
+"""Read board sensors and poll each group at its fixed nominal rate."""
 
-from __future__ import annotations
-
-from .hardware import get_hat
+from math import floor
 from sense_hat_emulator.hardware_profile import SENSOR_RATES_HZ
+from .hardware import get_hat
 
 
-def read_temperature() -> float:
-    return float(get_hat().get_temperature_from_humidity())
+def read_temperature():
+    sense = get_hat()
+    return float(sense.get_temperature_from_humidity())
 
 
-def read_acceleration() -> tuple[float, float, float]:
-    raw = get_hat().get_accelerometer_raw()
-    return (float(raw["x"]), float(raw["y"]), float(raw["z"]))
+def read_pressure():
+    sense = get_hat()
+    return float(sense.get_pressure())
 
 
-def read_pressure() -> float:
-    return float(get_hat().get_pressure())
+def read_humidity():
+    sense = get_hat()
+    return float(sense.get_humidity())
 
 
-def read_humidity() -> float:
-    return float(get_hat().get_humidity())
+def read_acceleration():
+    sense = get_hat()
+    acceleration = sense.get_accelerometer_raw()
+    x = float(acceleration['x'])
+    y = float(acceleration['y'])
+    z = float(acceleration['z'])
+    return x, y, z
 
 
-def read_gyroscope() -> tuple[float, float, float]:
-    raw = get_hat().get_gyroscope_raw()
-    return tuple(float(raw[axis]) for axis in 'xyz')
+def read_gyroscope():
+    sense = get_hat()
+    gyroscope = sense.get_gyroscope_raw()
+    x = float(gyroscope['x'])
+    y = float(gyroscope['y'])
+    z = float(gyroscope['z'])
+    return x, y, z
 
 
-def read_magnetic_field() -> tuple[float, float, float]:
-    raw = get_hat().get_compass_raw()
-    return tuple(float(raw[axis]) for axis in 'xyz')
+def read_magnetic_field():
+    sense = get_hat()
+    magnetic_field = sense.get_compass_raw()
+    x = float(magnetic_field['x'])
+    y = float(magnetic_field['y'])
+    z = float(magnetic_field['z'])
+    return x, y, z
 
 
 class SensorReader:
-    """Poll independent groups at their fixed nominal rates, retaining values."""
+    """Keep previous readings until each sensor group's next polling time.
+
+    now is seconds since the acquisition loop started. These are software poll
+    times; they do not guarantee delivery of every physical hardware sample.
+    """
 
     def __init__(self, sense):
         self.sense = sense
         self.readings = {}
-        self.next_due = {group: 0.0 for group in ('accel', 'mag', 'pressure', 'humidity')}
+        self.next_acceleration_time_s = 0.0
+        self.next_magnetic_time_s = 0.0
+        self.next_pressure_time_s = 0.0
+        self.next_humidity_time_s = 0.0
 
     def read(self, now):
-        from math import floor
-        for group in self.next_due:
+        # A tiny tolerance avoids missing a tick because of floating-point rounding.
+        if now + 1e-10 >= self.next_acceleration_time_s:
+            acceleration = self.sense.get_accelerometer_raw()
+            self.readings['accel_x'] = acceleration['x']
+            self.readings['accel_y'] = acceleration['y']
+            self.readings['accel_z'] = acceleration['z']
 
-            if now + 1e-10 < self.next_due[group]:
-                continue
-            if group == 'accel':
-                for prefix, getter in (('accel', self.sense.get_accelerometer_raw),
-                                       ('gyro', self.sense.get_gyroscope_raw)):
-                    vector = getter()
-                    self.readings.update({f'{prefix}_{axis}': vector[axis] for axis in 'xyz'})
+            gyroscope = self.sense.get_gyroscope_raw()
+            self.readings['gyro_x'] = gyroscope['x']
+            self.readings['gyro_y'] = gyroscope['y']
+            self.readings['gyro_z'] = gyroscope['z']
 
-            elif group == 'mag':
-                vector = self.sense.get_compass_raw()
-                self.readings.update({f'mag_{axis}': vector[axis] for axis in 'xyz'})
+            rate = SENSOR_RATES_HZ['accel']
+            self.next_acceleration_time_s = (floor((now + 1e-10) * rate) + 1) / rate
 
-            elif group == 'pressure':
-                self.readings.update(pressure=self.sense.get_pressure(), temperature_pressure=self.sense.get_temperature_from_pressure())
+        if now + 1e-10 >= self.next_magnetic_time_s:
+            magnetic_field = self.sense.get_compass_raw()
+            self.readings['mag_x'] = magnetic_field['x']
+            self.readings['mag_y'] = magnetic_field['y']
+            self.readings['mag_z'] = magnetic_field['z']
 
-            else:
-                self.readings.update(humidity=self.sense.get_humidity(), temperature_humidity=self.sense.get_temperature_from_humidity())
+            rate = SENSOR_RATES_HZ['mag']
+            self.next_magnetic_time_s = (floor((now + 1e-10) * rate) + 1) / rate
 
-            rate = SENSOR_RATES_HZ[group]
-            self.next_due[group] = (floor((now + 1e-10) * rate) + 1) / rate
-            
+        if now + 1e-10 >= self.next_pressure_time_s:
+            self.readings['pressure'] = self.sense.get_pressure()
+            self.readings['temperature_pressure'] = self.sense.get_temperature_from_pressure()
+
+            rate = SENSOR_RATES_HZ['pressure']
+            self.next_pressure_time_s = (floor((now + 1e-10) * rate) + 1) / rate
+
+        if now + 1e-10 >= self.next_humidity_time_s:
+            self.readings['humidity'] = self.sense.get_humidity()
+            self.readings['temperature_humidity'] = self.sense.get_temperature_from_humidity()
+
+            rate = SENSOR_RATES_HZ['humidity']
+            self.next_humidity_time_s = (floor((now + 1e-10) * rate) + 1) / rate
+
         return self.readings.copy()

@@ -1,80 +1,109 @@
-"""Initialize entry, continuously read sensors and optionally display status."""
+"""Initialize entry, read sensors continuously and optionally show live status."""
+# python -m edl_flight_computer.run --emulator
 
 import argparse
 from math import floor, radians
 from time import monotonic, sleep
-
+from sense_hat_emulator.hardware_profile import SENSOR_RATES_HZ
 from .hardware import get_hat
 from .mission import initialize
 from .sensors import SensorReader
-from sense_hat_emulator.hardware_profile import SENSOR_RATES_HZ
 
 
 def monitor(sense, state, source, window=None):
-    """Keep acquisition independent of the optional display. No descent physics yet."""
     reader = SensorReader(sense)
-    origin = monotonic()
-    deadline = 0.0
-    next_display = next_print = 0.0
-    readings = state.initial_measurements.copy()
+    monitor_started_at = monotonic()
+    sample_rate = SENSOR_RATES_HZ['accel']
+    next_read_time_s = 0.0
+    next_window_time_s = 0.0
+    next_print_time_s = 0.0
     previous_connection = None
+    readings = state.initial_measurements.copy()
+
     while True:
         now = monotonic()
-        relative = now - origin
-        if relative < deadline:
-            sleep(deadline - relative)
+        monitor_time_s = now - monitor_started_at
+        if monitor_time_s < next_read_time_s:
+            sleep(next_read_time_s - monitor_time_s)
             continue
+
         state.elapsed_s = now - state.mission_started_at
-        error = ''
+        error_message = ''
         try:
-            readings = reader.read(relative)
-            connected = True
-        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
-            connected, error = False, str(exc)
-        if connected != previous_connection or relative >= next_print:
-            print(f"t={state.elapsed_s:.1f}s | phase={state.phase.value}", flush=True)
-            previous_connection = connected
-            next_print = relative + 1
-        if window is not None and relative >= next_display:
-            window.publish(dict(source=source, connected=connected, error=error,phase=state.phase.value, elapsed_s=state.elapsed_s, updated_at=now, readings=readings))
-            next_display = relative + 0.1
+            readings = reader.read(monitor_time_s)
+            sensor_connected = True
+        except (OSError, RuntimeError) as error:
+            # A hardware read failure is expected to be recoverable. Keep the
+            # previous readings and report it; programming errors remain visible.
+            sensor_connected = False
+            error_message = str(error)
 
-        # Add ongoing entry calculations here when ready.
+        if sensor_connected != previous_connection or monitor_time_s >= next_print_time_s:
+            print(f't={state.elapsed_s:.1f}s | phase={state.phase.value}', flush=True)
+            previous_connection = sensor_connected
+            next_print_time_s = monitor_time_s + 1.0
 
-        after = monotonic() - origin
-        deadline = (floor(after * SENSOR_RATES_HZ['accel']) + 1) / SENSOR_RATES_HZ['accel']
-        sleep(max(0, deadline - after))
+        if window is not None and monitor_time_s >= next_window_time_s:
+            snapshot = {
+                'source': source,
+                'connected': sensor_connected,
+                'error': error_message,
+                'phase': state.phase.value,
+                'elapsed_s': state.elapsed_s,
+                'updated_at': now,
+                'readings': readings,
+            }
+            window.publish(snapshot)
+            next_window_time_s = monitor_time_s + 0.1
+
+        # Add your ongoing entry calculations here when ready.
+
+        # Wait for the next nominal acquisition slot. Skip missed slots rather
+        # than inventing readings to catch up after an operating-system delay.
+        completed_time_s = monotonic() - monitor_started_at
+        completed_slot = floor(completed_time_s * sample_rate)
+        next_read_time_s = (completed_slot + 1) / sample_rate
+        wait_time_s = next_read_time_s - completed_time_s
+        if wait_time_s > 0:
+            sleep(wait_time_s)
 
 
 def main(argv=None):
-
-    # Entry conditions
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--emulator", action="store_true", help="Explicitly use simulated sensors")
-    parser.add_argument("--no-window", action="store_true", help="Run sensor monitoring in the terminal only")
-    parser.add_argument("--entry-altitude-m", type=float, default=120000.0)
-    parser.add_argument("--entry-velocity-m-s", type=float, default=7800.0)
-    parser.add_argument("--entry-fpa-deg", type=float, default=-6.5)
+    parser.add_argument('--emulator', action='store_true', help='Explicitly use simulated sensors')
+    parser.add_argument('--no-window', action='store_true', help='Show status in the terminal only')
+    parser.add_argument('--entry-altitude-m', type=float, default=120000.0)
+    parser.add_argument('--entry-velocity-m-s', type=float, default=7800.0)
+    parser.add_argument('--entry-fpa-deg', type=float, default=-6.5)
     args = parser.parse_args(argv)
 
+    if args.emulator:
+        source = 'EMULATOR'
+    else:
+        source = 'REAL SENSE HAT'
+    flight_path_angle_rad = radians(args.entry_fpa_deg)
+
+    print(f'INITIALIZING | source={source}')
     try:
-        print("INITIALIZING | source=" + ("EMULATOR" if args.emulator else "REAL SENSE HAT"))
         sense = get_hat(force_emulator=args.emulator, require_hardware=not args.emulator)
-        state = initialize(sense, args.entry_altitude_m, args.entry_velocity_m_s, radians(args.entry_fpa_deg))
-    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
-        parser.exit(1, f"Initialization failed: {exc}\n")
-    print(f"ATMOSPHERIC_ENTRY | phase={state.phase.value} | t={state.elapsed_s:.1f}s | "
-          f"altitude={state.altitude_m:.1f}m | velocity={state.velocity_m_s:.1f}m/s | "
-          f"FPA={args.entry_fpa_deg:.2f}deg")
+        state = initialize(sense, args.entry_altitude_m, args.entry_velocity_m_s, flight_path_angle_rad)
+    except (OSError, RuntimeError, ValueError) as error:
+        parser.exit(1, f'Initialization failed: {error}\n')
+
+    print(f'ATMOSPHERIC_ENTRY | phase={state.phase.value} | t={state.elapsed_s:.1f}s | '
+          f'altitude={state.altitude_m:.1f}m | velocity={state.velocity_m_s:.1f}m/s | '
+          f'FPA={args.entry_fpa_deg:.2f}deg')
+
     window = None
+    if not args.no_window:
+        from .status_window import StatusWindow
+        try:
+            window = StatusWindow()
+        except (OSError, RuntimeError) as error:
+            print(f'Cannot open status window: {error}. Continuing in terminal.', flush=True)
+
     try:
-        if not args.no_window:
-            from .status_window import StatusWindow
-            try:
-                window = StatusWindow()
-            except (OSError, RuntimeError) as exc:
-                print(f'Status window unavailable ({exc}); continuing in terminal.', flush=True)
-        monitor(sense, state, 'EMULATOR' if args.emulator else 'REAL SENSE HAT', window)
+        monitor(sense, state, source, window)
     except KeyboardInterrupt:
         print('\nFlight program stopped.')
     finally:

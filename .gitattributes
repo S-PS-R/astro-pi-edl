@@ -1,0 +1,3 @@
+# Use LF line endings for Python files on Windows and Raspberry Pi.
+.gitattributes text eol=lf
+*.py text eol=lf
