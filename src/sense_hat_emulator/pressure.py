@@ -5,10 +5,12 @@ Author: Samir Rathore
 
 from random import Random
 from .humidity import SampleChannel
+from .hardware_profile import SENSOR_RATES_HZ
 
 
 class PressureSensor:
-    period = 0.04
+    period = 1 / SENSOR_RATES_HZ['pressure']  # LPS25H CTRL_REG1=0xc4.
+    keys = ('pressure', 'temperature_pressure')
 
     def __init__(self, seed, targets):
         self.random = Random(seed)

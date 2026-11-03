@@ -11,7 +11,7 @@ from secrets import randbits
 from time import monotonic
 from .humidity import HumiditySensor
 from .pressure import PressureSensor
-from .imu import IMUSensor, MagnetometerSensor
+from .imu import IMUSensor, MagnetometerSensor, ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
 import csv
 from pathlib import Path
 from numbers import Real
@@ -26,9 +26,9 @@ RANGES = {
     'temperature': (-40, 120),
     'temperature_humidity': (-40, 120), 'temperature_pressure': (-30, 105),
     'pressure': (260, 1260), 'humidity': (0, 100),
-    **{f'accel_{axis}': (-16, 16) for axis in 'xyz'},
-    **{f'gyro_{axis}': (-34.9065850399, 34.9065850399) for axis in 'xyz'},
-    **{f'mag_{axis}': (-1600, 1600) for axis in 'xyz'},
+    **{f'accel_{axis}': (-ACCEL_LIMIT, ACCEL_LIMIT) for axis in 'xyz'},
+    **{f'gyro_{axis}': (-GYRO_LIMIT, GYRO_LIMIT) for axis in 'xyz'},
+    **{f'mag_{axis}': (-MAG_LIMIT, MAG_LIMIT) for axis in 'xyz'},
 }
 
 def measured_value(key, value):
@@ -142,20 +142,19 @@ class EmulatorState:
             relative = (end-self.origin) / model.period
             due = max(0, ceil(relative-1e-8)-1) if before else int(relative+1e-8)
             if not self.noise:
+                if due > self.ticks[index]:
+                    self.readings.update({key: self.targets[key] for key in model.keys})
                 self.ticks[index] = due
                 continue
             while self.ticks[index] < due:
                 self.readings.update(model.sample(self.targets))
                 self.ticks[index] += 1
-        if not self.noise:
-            self.readings.update(self.targets)
         self.readings['temperature'] = self.readings['temperature_humidity']
 
     def run_to(self, end):
         if self.mode == 'replay':
-            if self.replay_paused or self.replay_finished:
+            if self.replay_paused:
                 return
-            end = min(end, self.replay[-1][0])
             while self.replay_index+1 < len(self.replay) and self.replay[self.replay_index+1][0] <= end+1e-10:
                 time_s, row, colour = self.replay[self.replay_index+1]
                 # At an exact boundary, apply the new CSV row before its sensor tick.
@@ -163,8 +162,6 @@ class EmulatorState:
                 self.targets.update(row)
                 if colour is not None:
                     self.pixels = [colour] * 64
-                if not self.noise:
-                    self.readings.update(row)
                 self.replay_index += 1
             self._sample_to(end)
             self.elapsed = end
@@ -191,8 +188,6 @@ class EmulatorState:
             if self.mode == 'replay':
                 raise RuntimeError('Stop CSV replay before changing sensor targets')
             self.targets.update(checked)
-            if not self.noise:
-                self.readings.update(self.targets)
 
     def reset(self):
         with self.lock:
@@ -257,7 +252,7 @@ class SenseEmu:
               f"time={'realtime' if self._state.realtime else 'manual'} | mode={self.mode}")
         print(f'[SenseEmu] model rates: humidity {1/HumiditySensor.period:g} Hz | '
               f'pressure {1/PressureSensor.period:g} Hz | accel/gyro {1/IMUSensor.period:g} Hz | '
-              f'magnetic {1/MagnetometerSensor.period:g} Hz; exact replay uses CSV timestamps')
+              f'magnetic {1/MagnetometerSensor.period:g} Hz; fixed clocks also apply with noise OFF')
 
     def advance(self, seconds):
         """Advance deterministic simulation time; requires realtime=False."""
@@ -279,7 +274,7 @@ class SenseEmu:
         return self._state.mode
 
     def load_csv(self, path, noise=False):
-        """Validate and start a recording at time zero; raw sample-hold by default."""
+        """Load physical targets at CSV timestamps; all readings use fixed sensor clocks."""
         if type(noise) is not bool:
             raise TypeError('noise must be True or False')
         samples = read_csv_samples(path)
@@ -350,7 +345,8 @@ class SenseEmu:
     def get_replay_status(self):
         with self._state.lock:
             self._state.sync()
-            return dict(active=self.mode == 'replay', time_s=self._state.elapsed,
+            playback_time = min(self._state.elapsed, self._state.replay[-1][0]) if self.mode == 'replay' else self._state.elapsed
+            return dict(active=self.mode == 'replay', time_s=playback_time,
                         controls_leds=self.mode == 'replay' and self._state.replay[0][2] is not None,
                         sample=self._state.replay_index,
                         samples=len(self._state.replay),

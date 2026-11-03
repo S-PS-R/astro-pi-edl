@@ -6,7 +6,12 @@ __pycache__/
 .vscode/
 
 # OS files
-.DS_Store.venv/
+.DS_Store
+.venv/
+.matplotlib-cache/
+.pytest_cache/
+build/
+dist/
 
 # emulator
 *.egg-info/

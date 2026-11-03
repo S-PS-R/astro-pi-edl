@@ -5,6 +5,7 @@ Author: Samir Rathore
 
 from collections import deque
 from random import Random
+from .hardware_profile import SENSOR_RATES_HZ
 
 
 class SampleChannel:
@@ -27,7 +28,8 @@ class SampleChannel:
 
 
 class HumiditySensor:
-    period = 1 / 12.5  # HTS221 maximum continuous output data rate.
+    period = 1 / SENSOR_RATES_HZ['humidity']  # HTS221 CTRL_REG1=0x87.
+    keys = ('humidity', 'temperature_humidity')
 
     def __init__(self, seed, targets):
         self.random = Random(seed)

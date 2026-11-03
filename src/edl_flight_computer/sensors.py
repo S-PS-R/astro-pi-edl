@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .hat import get_hat
+from .hardware import get_hat
 
 
 def read_temperature() -> float:
@@ -18,4 +18,15 @@ def read_pressure() -> float:
     return float(get_hat().get_pressure())
 
 
-read_aux = read_pressure
+def read_humidity() -> float:
+    return float(get_hat().get_humidity())
+
+
+def read_gyroscope() -> tuple[float, float, float]:
+    raw = get_hat().get_gyroscope_raw()
+    return tuple(float(raw[axis]) for axis in 'xyz')
+
+
+def read_magnetic_field() -> tuple[float, float, float]:
+    raw = get_hat().get_compass_raw()
+    return tuple(float(raw[axis]) for axis in 'xyz')

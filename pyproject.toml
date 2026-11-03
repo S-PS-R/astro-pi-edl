@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "edl-sense-hat-emulator"
 version = "0.1.0"
-description = "A Python Sense HAT sensor emulator with a live Tkinter GUI"
-readme = "src/sense_hat_emulator/README.md"
+description = "Sense HAT V2 simulation, entry scenarios and real drop-test recording"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["numpy>=1.24", "scipy>=1.10", "matplotlib>=3.7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["sense_hat_emulator*"]
+include = ["sense_hat_emulator*", "edl_flight_computer*"]

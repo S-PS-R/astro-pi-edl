@@ -9,12 +9,11 @@ import time
 import os
 import math
 import shutil
-import shlex
 from itertools import cycle
 import argparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from edl_flight_computer.hat import get_hat, is_simulated
+from edl_flight_computer.hardware import get_hat, is_simulated
 OVR = -1e6
 
 # Advance once per sensor sample; restart at red when the process starts.
@@ -30,10 +29,9 @@ LED_COLORS = [
 _led_colors = cycle(LED_COLORS)
 
 def open_monitor_terminal(noise=True, seed=None, csv_path=None, replay_noise=False):
-    """Launch a terminal for this OS, preserving the current Python environment.
+    """Launch a Linux desktop terminal, falling back to the current terminal.
 
-    --monitor prevents the child from launching another terminal. If launching
-    fails or no desktop terminal is available, use the current terminal.
+    --monitor prevents the child from launching another terminal
     """
     command = [sys.executable, str(Path(__file__).resolve()), "--monitor"]
     if not noise:
@@ -45,22 +43,6 @@ def open_monitor_terminal(noise=True, seed=None, csv_path=None, replay_noise=Fal
     if replay_noise:
         command.append('--replay-noise')
     try:
-        if sys.platform == "win32":
-            # Windows creates a console for the same .venv Python interpreter.
-            subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_CONSOLE)
-            return
-
-        if sys.platform == "darwin":
-            # Pass the shell command as data, rather than embedding paths in
-            # AppleScript. shlex.join quotes spaces and shell metacharacters.
-            script = '''on run argv tell application "Terminal" do script (item 1 of argv)
-            activate end tell end run'''
-            subprocess.run(
-                ["osascript", "-e", script, shlex.join(command)],
-                check=True, capture_output=True, text=True,
-            )
-            return
-
         if sys.platform.startswith("linux") and (
             os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
         ):
@@ -79,7 +61,7 @@ def open_monitor_terminal(noise=True, seed=None, csv_path=None, replay_noise=Fal
                         return
                     except OSError:
                         continue
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except OSError as exc:
         print(f"Could not open a new terminal: {exc}")
 
     print("Using the current terminal for the sensor monitor.")
@@ -101,7 +83,6 @@ def print_readings(sense):
         led_color = get_next_led_color()
         sense.clear(*led_color)
     print(f"LED color: RGB{led_color}")
-    # Environmental sensors
     print("\n===== ENVIRONMENTAL SENSORS =====")
 
     temperature = sense.get_temperature()
@@ -155,18 +136,16 @@ def print_readings(sense):
 
 
 def monitor_sensors(noise=True, seed=None, csv_path=None, replay_noise=False):
-    """Show the emulator automatically, or monitor the real HAT in a loop."""
-    sense = get_hat(noise=noise, seed=seed, force_emulator=csv_path is not None)
+    """Monitor real hardware, or explicitly replay a CSV in the emulator."""
+    sense = get_hat(noise=noise, seed=seed, force_emulator=csv_path is not None, require_hardware=csv_path is None)
     if csv_path is not None:
         sense.load_csv(csv_path, noise=replay_noise)
     simulated = is_simulated()
     print(f"Sensor source: {'SenseEmu (simulated)' if simulated else 'Sense HAT (hardware)'}")
     if simulated:
-        print("Raw sensor inputs are independent; calculate orientation in your flight code.")
+        print("Raw sensor inputs are independent; calculate orientation in flight code.")
     try:
         if simulated:
-            # Tk stays on the main thread. Timer callbacks keep monitoring and
-            # the GUI responsive, using the very same emulator object.
             import tkinter as tk
             from sense_hat_emulator.gui import build_gui
             root = tk.Tk()
@@ -201,15 +180,18 @@ def monitor_sensors(noise=True, seed=None, csv_path=None, replay_noise=False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Monitor Sense HAT or SenseEmu sensors")
+    parser = argparse.ArgumentParser(description="Monitor real Sense HAT sensors, or replay a CSV")
     parser.add_argument('--monitor', action='store_true', help='Use this terminal')
-    parser.add_argument('--noise', action=argparse.BooleanOptionalAction, default=True,
-                        help='Enable/disable emulator sensor noise (default: enabled)')
+    parser.add_argument('--noise', action=argparse.BooleanOptionalAction, default=True, help='Enable/disable emulator sensor noise (default: enabled)')
     parser.add_argument('--seed', type=int, help='Emulator random seed')
     parser.add_argument('--csv', type=Path, help='Replay sensor CSV; always uses the emulator')
-    parser.add_argument('--replay-noise', action='store_true',
-                        help='Add sensor noise to CSV inputs (default: exact replay)')
+    parser.add_argument('--replay-noise', action='store_true', help='Add sensor noise to CSV inputs (default: exact replay)')
     args = parser.parse_args()
+    if args.csv is None:
+        try:
+            get_hat(require_hardware=True)
+        except RuntimeError as exc:
+            parser.exit(1, f"Error: {exc}\n")
     if args.monitor:
         monitor_sensors(noise=args.noise, seed=args.seed, csv_path=args.csv, replay_noise=args.replay_noise)
     else:

@@ -142,7 +142,7 @@ def build_gui(root, sense=None):
                                          filetypes=[('Sensor CSV', '*.csv'), ('All files', '*.*')])
         if path:
             try:
-                sense.load_csv(path)  # Replay is exact by default; opt into noise below.
+                sense.load_csv(path)  # No added noise by default; hardware clocks always apply.
             except (OSError, ValueError, UnicodeError) as exc:
                 messagebox.showerror('Cannot load recording', str(exc), parent=root)
 
@@ -225,7 +225,7 @@ def build_gui(root, sense=None):
         pause_button.configure(text='Resume' if status['paused'] else 'Pause')
         pause_button.state(['disabled'] if status['finished'] or mode != 'replay' else ['!disabled'])
         if mode == 'replay':
-            phase = 'Finished — holding last sample' if status['finished'] else 'Paused' if status['paused'] else 'Playing'
+            phase = 'Finished — holding final target' if status['finished'] else 'Paused' if status['paused'] else 'Playing'
             status_text.set(f"CSV: {phase} | {status['time_s']:.3f} s | row {status['sample']+1}/{status['samples']} | "
                             f"noise {'ON' if sense.noise else 'OFF'}")
         else:
