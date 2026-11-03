@@ -1,46 +1,93 @@
-"""
-Independent X/Y/Z IMU noise, in public API units: g, rad/s, and µT.
-Author: Samir Rathore
-"""
+"""Independent acceleration, gyroscope and magnetic readings in board axes."""
 
 from math import radians
 from random import Random
-from .humidity import SampleChannel
 from .hardware_profile import SENSOR_RATES_HZ
 
-# RTIMULib defaults: +/-8 g, +/-500 deg/s, +/-4 gauss.
-ACCEL_LIMIT = 8.0
-MAG_LIMIT = 400.0  # 4 gauss, expressed in microtesla
-GYRO_LIMIT = radians(500)
+# Fixed RTIMULib default ranges, expressed in the public API units.
+ACCEL_LIMIT = 8.0             # g
+GYRO_LIMIT = radians(500)    # rad/s
+MAG_LIMIT = 400.0            # Microtesla (4 gauss).
+
 
 class IMUSensor:
-    """Independent axes on the fixed 119 Hz acceleration/gyro output clock."""
     period = 1 / SENSOR_RATES_HZ['accel']
-    specifications = (
-        ('accel', -ACCEL_LIMIT, ACCEL_LIMIT, 1 / 0.000244, 0.1),
-        ('gyro', -GYRO_LIMIT, GYRO_LIMIT, 1 / radians(0.0175), radians(1)),
-    )
+    keys = ('accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z')
 
-    def __init__(self, seed, targets):
+    def __init__(self, seed):
         self.random = Random(seed)
-        self.channels = {}
-        # Default sensitivities: 0.244 mg, 17.5 mdps, 0.14 mgauss per LSB.
-        # Preserve the existing synthetic noise parameters.
-        for prefix, low, high, factor, error in self.specifications:
-            for axis in 'xyz':
-                key = f'{prefix}_{axis}'
-                self.channels[key] = (SampleChannel(targets[key], 10, low, high, factor), error)
 
-    def sample(self, targets):
-        return {key: channel.sample(targets[key], error, self.random)
-                for key, (channel, error) in self.channels.items()}
+    def sample(self, environment):
+        true_accel_x = environment['accel_x']
+        true_accel_y = environment['accel_y']
+        true_accel_z = environment['accel_z']
+        true_gyro_x = environment['gyro_x']
+        true_gyro_y = environment['gyro_y']
+        true_gyro_z = environment['gyro_z']
 
-    @property
-    def keys(self):
-        return tuple(self.channels)
+        # Synthetic noise standard deviations; these still need calibration.
+        acceleration_noise_std = 0.02  # g
+        gyro_noise_std = radians(0.2)  # rad/s
+
+        accel_noise_x = self.random.gauss(0, acceleration_noise_std)
+        accel_noise_y = self.random.gauss(0, acceleration_noise_std)
+        accel_noise_z = self.random.gauss(0, acceleration_noise_std)
+        gyro_noise_x = self.random.gauss(0, gyro_noise_std)
+        gyro_noise_y = self.random.gauss(0, gyro_noise_std)
+        gyro_noise_z = self.random.gauss(0, gyro_noise_std)
+
+        accel_reading_x = true_accel_x + accel_noise_x
+        accel_reading_y = true_accel_y + accel_noise_y
+        accel_reading_z = true_accel_z + accel_noise_z
+        gyro_reading_x = true_gyro_x + gyro_noise_x
+        gyro_reading_y = true_gyro_y + gyro_noise_y
+        gyro_reading_z = true_gyro_z + gyro_noise_z
+
+        accel_reading_x = min(ACCEL_LIMIT, max(-ACCEL_LIMIT, accel_reading_x))
+        accel_reading_y = min(ACCEL_LIMIT, max(-ACCEL_LIMIT, accel_reading_y))
+        accel_reading_z = min(ACCEL_LIMIT, max(-ACCEL_LIMIT, accel_reading_z))
+        gyro_reading_x = min(GYRO_LIMIT, max(-GYRO_LIMIT, gyro_reading_x))
+        gyro_reading_y = min(GYRO_LIMIT, max(-GYRO_LIMIT, gyro_reading_y))
+        gyro_reading_z = min(GYRO_LIMIT, max(-GYRO_LIMIT, gyro_reading_z))
+
+        return {
+            'accel_x': accel_reading_x,
+            'accel_y': accel_reading_y,
+            'accel_z': accel_reading_z,
+            'gyro_x': gyro_reading_x,
+            'gyro_y': gyro_reading_y,
+            'gyro_z': gyro_reading_z,
+        }
 
 
-class MagnetometerSensor(IMUSensor):
-    """Independent magnetic output clock at the fixed 20 Hz default."""
+class MagnetometerSensor:
     period = 1 / SENSOR_RATES_HZ['mag']
-    specifications = (('mag', -MAG_LIMIT, MAG_LIMIT, 1 / 0.014, 200.0),)
+    keys = ('mag_x', 'mag_y', 'mag_z')
+
+    def __init__(self, seed):
+        self.random = Random(seed)
+
+    def sample(self, environment):
+        true_mag_x = environment['mag_x']
+        true_mag_y = environment['mag_y']
+        true_mag_z = environment['mag_z']
+
+        # Retained synthetic per-sample noise; not a measured hardware value.
+        magnetic_noise_std = 40.0  # Microtesla; still needs calibration.
+        mag_noise_x = self.random.gauss(0, magnetic_noise_std)
+        mag_noise_y = self.random.gauss(0, magnetic_noise_std)
+        mag_noise_z = self.random.gauss(0, magnetic_noise_std)
+
+        mag_reading_x = true_mag_x + mag_noise_x
+        mag_reading_y = true_mag_y + mag_noise_y
+        mag_reading_z = true_mag_z + mag_noise_z
+
+        mag_reading_x = min(MAG_LIMIT, max(-MAG_LIMIT, mag_reading_x))
+        mag_reading_y = min(MAG_LIMIT, max(-MAG_LIMIT, mag_reading_y))
+        mag_reading_z = min(MAG_LIMIT, max(-MAG_LIMIT, mag_reading_z))
+
+        return {
+            'mag_x': mag_reading_x,
+            'mag_y': mag_reading_y,
+            'mag_z': mag_reading_z,
+        }

@@ -1,46 +1,49 @@
 """
-HTS221 humidity/temperature model and a shared rolling-sample helper.
+Simulated humidity and the temperature measured by the humidity sensor.
 Author: Samir Rathore
 """
 
-from collections import deque
 from random import Random
 from .hardware_profile import SENSOR_RATES_HZ
 
 
-class SampleChannel:
-    """Average N noisy samples, then clamp and quantize like a sensor register."""
-    def __init__(self, default, count, low, high, factor, offset=0):
-        self.count, self.low, self.high = count, low, high
-        self.factor, self.offset = factor, offset
-        self.reset(default)
-
-    def reset(self, target):
-        self.history = deque([target] * self.count, maxlen=self.count)
-        self.value = target
-
-    def sample(self, target, error, rng):
-        self.history.append(target + rng.gauss(0, 0.2) * error)
-        mean = sum(self.history) / self.count
-        limited = min(self.high, max(self.low, mean))
-        self.value = int((limited - self.offset) * self.factor) / self.factor + self.offset
-        return self.value
-
-
 class HumiditySensor:
+
+    # The emulator calls sample() on this fixed clock, only when noise is enabled.
     period = 1 / SENSOR_RATES_HZ['humidity']  # HTS221 CTRL_REG1=0x87.
     keys = ('humidity', 'temperature_humidity')
 
-    def __init__(self, seed, targets):
+    def __init__(self, seed):
         self.random = Random(seed)
-        self.humidity = SampleChannel(targets['humidity'], 10, 0, 100, 256)
-        self.temperature = SampleChannel(targets['temperature_humidity'], 31, -40, 120, 64)
 
-    def sample(self, targets):
-        h, t = targets['humidity'], targets['temperature_humidity']
-        h_error = 3.5 if 20 <= h <= 80 else 5.0
-        t_error = 0.5 if 15 <= t <= 40 else 1.0 if 0 <= t <= 60 else 2.0
+    def sample(self, environment):
+        """Return one reading from the current simulated environmental values."""
+        true_humidity = environment['humidity']
+        true_temperature = environment['temperature_humidity']
+
+        # Random noise (need to quantify)
+        if 20 <= true_humidity <= 80:
+            humidity_noise_std = 0.7  # Percentage points of relative humidity.
+        else:
+            humidity_noise_std = 1.0
+
+        if 15 <= true_temperature <= 40:
+            temperature_noise_std = 0.1  # deg C
+        elif 0 <= true_temperature <= 60:
+            temperature_noise_std = 0.2
+        else:
+            temperature_noise_std = 0.4
+
+        humidity_noise = self.random.gauss(0, humidity_noise_std)
+        temperature_noise = self.random.gauss(0, temperature_noise_std)
+        humidity_reading = true_humidity + humidity_noise
+        temperature_reading = true_temperature + temperature_noise
+
+        # Limit the readings to the modeled sensor ranges.
+        humidity_reading = min(100, max(0, humidity_reading))
+        temperature_reading = min(120, max(-40, temperature_reading))
+
         return {
-            'humidity': self.humidity.sample(h, h_error, self.random),
-            'temperature_humidity': self.temperature.sample(t, t_error, self.random),
+            'humidity': humidity_reading,
+            'temperature_humidity': temperature_reading,
         }

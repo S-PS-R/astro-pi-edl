@@ -22,6 +22,8 @@ setup, follow [Raspberry Pi setup](docs/raspberry_pi_setup.md).
 | Task | Command |
 | --- | --- |
 | Open the independent sensor emulator | `python -m sense_hat_emulator` |
+| Initialize entry and open live status (desktop) | `python -m edl_flight_computer.run --emulator` |
+| Initialize entry and open live status (Pi hardware) | `python -m edl_flight_computer.run` |
 | Generate entry data | `python data/create_atmospheric_data.py` |
 | List body presets | `python data/create_atmospheric_data.py --list-bodies` |
 | Replay entry data in the emulator | `python tools/calibration/check_sensors.py --csv data/atmospheric_entry/entry.csv` |
@@ -52,6 +54,22 @@ run. The `__init__.py` files under `src/` expose the emulator and flight-compute
 packages. Importing these packages does not open hardware or a GUI.
 
 ## Sensor emulator
+
+### Live flight status
+
+`edl_flight_computer.run` initializes sensors, enters `ENTRY`, and continuously
+reads sensors until Ctrl+C. Its small read-only window shows the selected source,
+connection/read status, phase, elapsed time, telemetry age and environmental/IMU
+readings. The phase and initial entry conditions remain unchanged until you add
+descent calculations. This command does not yet log a flight or run deployment logic.
+
+The window runs in a separate process and receives display updates at about
+10 Hz. Closing it leaves sensor acquisition and terminal status running. If the
+window cannot open, the flight program continues in the terminal. Use
+`--no-window` for terminal-only operation. Hardware is required unless
+`--emulator` is explicitly selected. Stop the program with Ctrl+C in the terminal.
+
+### Independent sensor controls
 
 ```python
 from sense_hat_emulator import SenseEmu
@@ -98,11 +116,14 @@ the appropriate sensor clock. Faster calls do not create samples. Manual time
 moves only through `advance(seconds)`; real-time mode catches up to a monotonic
 clock on access. GUI refresh is approximately 30 Hz, independent of sensor ODR.
 
-`noise=False` removes noise, smoothing and quantization but retains sensor clocks.
-`noise=True` adds seeded Gaussian noise and moving averages: 10 humidity samples,
-31 humidity-temperature, 25 pressure/pressure-temperature, and 10 for each IMU
-channel. These are illustrative filters, not validated hardware replicas.
-Resetting/toggling noise restarts histories and clocks. Public readings outside
+`noise=False` returns unperturbed values at the fixed sensor ticks.
+`noise=True` adds seeded Gaussian noise to each channel and limits the reading
+to its modeled range. All sensor files use explicit true-value, noise, reading
+and limit calculations, without moving averages or resolution rounding.
+The per-sample noise magnitudes are retained from the earlier model, so removing
+averaging makes the displayed noise more noticeable. These synthetic magnitudes
+still need calibration against real measurements; they are not accuracy guarantees.
+Resetting/toggling noise restarts random sequences and clocks. Public readings outside
 modeled ranges return `OVR` (-1e6); the real driver does not necessarily do this.
 Physical targets remain available internally through `sense._state.snapshot()`.
 

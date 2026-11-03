@@ -61,5 +61,6 @@ hardware and emulator timing, not a measurement of physical oscillator accuracy.
 Manual emulator time gives deterministic nominal ticks. Real Python/Linux is
 not a hard real-time system and physical chips have oscillator tolerances.
 Neither a desktop simulation nor a sleep() loop guarantees exact wall-clock
-hardware timing. Synthetic noise/moving averages are not validated hardware
-filter replicas. Upper-atmosphere proxies can also exceed real sensor ranges.
+hardware timing. Synthetic noise is not a validated hardware noise/filter model;
+the simplified sensors do not reproduce averaging or register quantization.
+Upper-atmosphere proxies can also exceed real sensor ranges.

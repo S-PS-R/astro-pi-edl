@@ -131,8 +131,12 @@ class EmulatorState:
 
     def _make_models(self):
         random = Random(self.seed)
-        self.models = [model(random.getrandbits(64), self.targets)
-                       for model in (HumiditySensor, PressureSensor, IMUSensor, MagnetometerSensor)]
+        self.models = [
+            HumiditySensor(random.getrandbits(64)),
+            PressureSensor(random.getrandbits(64)),
+            IMUSensor(random.getrandbits(64)),
+            MagnetometerSensor(random.getrandbits(64)),
+        ]
         self.ticks = [0] * len(self.models)
         self.origin = self.elapsed
         self.readings = self.targets.copy()
@@ -252,7 +256,7 @@ class SenseEmu:
               f"time={'realtime' if self._state.realtime else 'manual'} | mode={self.mode}")
         print(f'[SenseEmu] model rates: humidity {1/HumiditySensor.period:g} Hz | '
               f'pressure {1/PressureSensor.period:g} Hz | accel/gyro {1/IMUSensor.period:g} Hz | '
-              f'magnetic {1/MagnetometerSensor.period:g} Hz; fixed clocks also apply with noise OFF')
+              f'magnetic {1/MagnetometerSensor.period:g} Hz')
 
     def advance(self, seconds):
         """Advance deterministic simulation time; requires realtime=False."""

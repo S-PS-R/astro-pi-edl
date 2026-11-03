@@ -1,243 +1,210 @@
-"""
-One-window sensor controls and an API-driven 8x8 RGB display.
-Author: Samir Rathore
-"""
+"""Sensor controls, CSV playback and the emulator's 8x8 LED display."""
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import Any
 
-# Preserve direct script launch as well as installed package launch.
+# Allow both python -m sense_hat_emulator and direct execution of this file.
 if __package__:
     from .emulator import SenseEmu, OVR
-    from .imu import GYRO_LIMIT, ACCEL_LIMIT, MAG_LIMIT
+    from .imu import ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
 else:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from sense_hat_emulator.emulator import SenseEmu, OVR
-    from sense_hat_emulator.imu import GYRO_LIMIT, ACCEL_LIMIT, MAG_LIMIT
+    from sense_hat_emulator.imu import ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
 
 
-class GuiBinding:
-    def __init__(self, sense, values, draw_pixels):
+class EmulatorGUI:
+    """Keep this window's widgets together; sensor calculations stay in the models."""
+
+    def __init__(self, root, sense):
+        self.root = root
         self.sense = sense
-        self.values = values
-        self.draw_pixels = draw_pixels
-        self.refreshing = False
-        self.last_pixels = None
-        for key, variable in values.items():
-            variable.trace_add("write", self._on_change(key, variable))
+        self.controls = {}
+        self.timer = None
+        self.previous_pixels = None
+        self.initial_values, _ = sense._state.snapshot()
 
-    def _on_change(self, key, variable):
-        def changed(*_args):
-            if not self.refreshing and self.sense.mode != 'replay':
-                value = variable.get()
-                self.sense._state.update({key: value})
-        return changed
+        root.title('Sense HAT V2 Emulator')
+        root.minsize(900, 550)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+        panel = ttk.Frame(root, padding=10)
+        panel.grid(row=0, column=0, sticky='nsew')
+        panel.columnconfigure(1, weight=1)
+        panel.rowconfigure(1, weight=1)
+
+        # Playback buttons.
+        toolbar = ttk.Frame(panel)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 8))
+        ttk.Button(toolbar, text='Load CSV', command=self.load_csv).grid(row=0, column=0, padx=3)
+        self.pause_button = ttk.Button(toolbar, text='Pause', command=self.pause_or_resume)
+        self.pause_button.grid(row=0, column=1, padx=3)
+        self.restart_button = ttk.Button(toolbar, text='Restart', command=sense.restart_replay)
+        self.restart_button.grid(row=0, column=2, padx=3)
+        self.stop_button = ttk.Button(toolbar, text='Stop CSV', command=sense.stop_replay)
+        self.stop_button.grid(row=0, column=3, padx=3)
+
+        # Create the 64 LED squares once; refresh only changes their colours.
+        led_frame = ttk.LabelFrame(panel, text='8 x 8 RGB LEDs', padding=10)
+        led_frame.grid(row=1, column=0, sticky='nw', padx=(0, 10))
+        self.canvas = tk.Canvas(led_frame, width=224, height=224,
+                                background='#171c24', highlightthickness=0)
+        self.canvas.pack()
+        ttk.Label(led_frame, text='(0, 0) top left; X right, Y down').pack(pady=(6, 0))
+        self.led_squares = []
+        for y in range(8):
+            for x in range(8):
+                square = self.canvas.create_rectangle(
+                    x * 28 + 3, y * 28 + 3, x * 28 + 25, y * 28 + 25,
+                    fill='#000000', outline='#394351')
+                self.led_squares.append(square)
+
+        # Four groups of independent sensor inputs.
+        sensors = ttk.Frame(panel)
+        sensors.grid(row=1, column=1, sticky='nsew')
+        sensors.columnconfigure(0, weight=1)
+        sensors.columnconfigure(1, weight=1)
+        environment = ttk.LabelFrame(sensors, text='Environment targets', padding=6)
+        magnetic = ttk.LabelFrame(sensors, text='Board magnetic field', padding=6)
+        acceleration = ttk.LabelFrame(sensors, text='Board acceleration', padding=6)
+        gyroscope = ttk.LabelFrame(sensors, text='Board gyroscope', padding=6)
+        environment.grid(row=0, column=0, sticky='nsew', padx=3, pady=3)
+        magnetic.grid(row=0, column=1, sticky='nsew', padx=3, pady=3)
+        acceleration.grid(row=1, column=0, sticky='nsew', padx=3, pady=3)
+        gyroscope.grid(row=1, column=1, sticky='nsew', padx=3, pady=3)
+        self.add_sensor(environment, 0, 'temperature', 'Temperature', '°C', -40, 120, 2)
+        self.add_sensor(environment, 1, 'pressure', 'Pressure', 'hPa', 260, 1260, 2)
+        self.add_sensor(environment, 2, 'humidity', 'Humidity', '%', 0, 100, 1)
+        self.add_vector(magnetic, 'mag', 'µT', MAG_LIMIT, 2)
+        self.add_vector(acceleration, 'accel', 'g', ACCEL_LIMIT, 4)
+        self.add_vector(gyroscope, 'gyro', 'rad/s', GYRO_LIMIT, 4)
+
+        # Noise and reset controls.
+        self.noise_enabled = tk.BooleanVar(master=root, value=sense.noise)
+        ttk.Checkbutton(panel, text='Sensor noise', variable=self.noise_enabled,
+                        command=self.change_noise).grid(row=2, column=0, sticky='w', pady=8)
+        ttk.Button(panel, text='Reset sensors', command=sense.reset_sensors).grid(
+            row=2, column=1, sticky='e')
+        self.status = tk.StringVar(master=root)
+        ttk.Label(panel, textvariable=self.status, wraplength=850).grid(
+            row=3, column=0, columnspan=2, sticky='w')
+
+        root.bind('<Destroy>', self.on_destroy, add='+')
+        self.refresh()
+
+    def add_sensor(self, parent, row, name, label, unit, minimum, maximum, decimals):
+        """One slider changes a target; its numeric label shows the sampled reading."""
+        frame = ttk.Frame(parent, padding=(0, 4))
+        frame.grid(row=row, column=0, sticky='ew')
+        parent.columnconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        target_value = tk.DoubleVar(master=self.root, value=self.initial_values[name])
+        reading_text = tk.StringVar(master=self.root)
+
+        def change_value(value):
+            if self.sense.mode != 'replay':
+                self.sense._state.update({name: float(value)})
+
+        ttk.Label(frame, text=f'{label} ({minimum:g} to {maximum:g})').grid(
+            row=0, column=0, sticky='w')
+        ttk.Label(frame, textvariable=reading_text, width=14, anchor='e').grid(row=0, column=1)
+        slider = ttk.Scale(frame, from_=minimum, to=maximum, orient='horizontal',
+                           variable=target_value, command=change_value)
+        slider.grid(row=1, column=0, columnspan=2, sticky='ew')
+        self.controls[name] = {
+            'target': target_value, 'reading': reading_text, 'slider': slider,
+            'unit': unit, 'decimals': decimals,
+        }
+
+    def add_vector(self, parent, prefix, unit, limit, decimals):
+        for row, axis in enumerate('xyz'):
+            self.add_sensor(parent, row, f'{prefix}_{axis}', axis.upper(),
+                            unit, -limit, limit, decimals)
+
+    def load_csv(self):
+        path = filedialog.askopenfilename(parent=self.root, title='Load sensor recording',
+                                         filetypes=[('Sensor CSV', '*.csv')])
+        if not path:
+            return
+        # A bad user-selected file should show a useful message, not close the GUI.
+        try:
+            self.sense.load_csv(path)
+        except (OSError, ValueError, UnicodeError) as error:
+            messagebox.showerror('Cannot load recording', str(error), parent=self.root)
+
+    def pause_or_resume(self):
+        playback = self.sense.get_replay_status()
+        if playback['paused']:
+            self.sense.resume_replay()
+        else:
+            self.sense.pause_replay()
+
+    def change_noise(self):
+        self.sense.noise = self.noise_enabled.get()
 
     def refresh(self):
-        readings, pixels = self.sense._state.snapshot()
-        measured = self.sense.get_readings()
-        self.refreshing = True
-        try:
-            for key, variable in self.values.items():
-                value = readings[key]
-                if value == OVR:
-                    # Sliders display targets; an OVR measured value must never
-                    # move a control to the sentinel.
-                    continue
-                if variable.get() != value:
-                    variable.set(value)
-                actual = measured.get(key, value)
-                variable.reading_var.set('OVR' if actual == OVR else f'{actual:.{variable.decimals}f} {variable.unit}')
-        finally:
-            self.refreshing = False
-        if pixels != self.last_pixels:
-            self.draw_pixels(pixels)
-            self.last_pixels = pixels
+        """Read current values, update widgets, then schedule the next display refresh."""
+        targets, pixels = self.sense._state.snapshot()
+        readings = self.sense.get_readings()
+        playback = self.sense.get_replay_status()
+        replay_active = self.sense.mode == 'replay'
 
+        for name, control in self.controls.items():
+            # Changing the Tk variable does not invoke the slider's mouse command,
+            # so external API updates do not get written back into the sensor model.
+            control['target'].set(targets[name])
+            value = readings[name]
+            if value == OVR:
+                control['reading'].set('OVR')
+            else:
+                control['reading'].set(f"{value:.{control['decimals']}f} {control['unit']}")
+            control['slider'].configure(state='disabled' if replay_active else 'normal')
 
-def add_sensor(parent, row, title, unit, minimum, maximum, default, decimals=2):
-    """One compact horizontal slider, with a label and live value."""
-    frame = ttk.Frame(parent, padding=(6, 3))
-    frame.grid(row=row, column=0, sticky="ew")
-    parent.columnconfigure(0, weight=1)
-    frame.columnconfigure(0, weight=1)
-    # Tk variables do not declare custom attributes in their type stubs, but we
-    # intentionally attach slider/display metadata for the binding layer.
-    value: Any = tk.DoubleVar(master=parent, value=default)
-    reading = tk.StringVar(master=parent)
+        if pixels != self.previous_pixels:
+            for square, colour in zip(self.led_squares, pixels):
+                red, green, blue = colour
+                colour_code = f'#{red:02x}{green:02x}{blue:02x}'
+                self.canvas.itemconfigure(square, fill=colour_code)
+            self.previous_pixels = pixels
 
-    def update_reading(*_args):
-        reading.set(f"{value.get():.{decimals}f} {unit}")
+        self.noise_enabled.set(self.sense.noise)
+        button_state = 'normal' if replay_active else 'disabled'
+        self.restart_button.configure(state=button_state)
+        self.stop_button.configure(state=button_state)
+        self.pause_button.configure(text='Resume' if playback['paused'] else 'Pause')
+        if replay_active and not playback['finished']:
+            self.pause_button.configure(state='normal')
+        else:
+            self.pause_button.configure(state='disabled')
 
-    value.trace_add("write", update_reading)
-    value.title = title
-    value.reading_var = reading
-    value.decimals = decimals
-    value.unit = unit
-    value.range_label = ttk.Label(frame, text=f"{title} ({minimum:g} to {maximum:g})")
-    value.range_label.grid(row=0, column=0, sticky="w")
-    ttk.Label(frame, textvariable=reading, width=12, anchor="e").grid(row=0, column=1)
-    value.slider = ttk.Scale(frame, from_=minimum, to=maximum, orient="horizontal",
-                             length=160, variable=value)
-    value.slider.grid(row=1, column=0, columnspan=2, sticky="ew")
-    update_reading()
-    return value
+        if replay_active:
+            if playback['finished']:
+                description = 'Finished - holding final target'
+            elif playback['paused']:
+                description = 'Paused'
+            else:
+                description = 'Playing'
+            self.status.set(f"CSV: {description} | {playback['time_s']:.3f} s | "
+                            f"row {playback['sample'] + 1}/{playback['samples']}")
+        else:
+            self.status.set('Sliders set physical targets; labels show sampled readings. Gyro units: rad/s.')
 
+        self.timer = self.root.after(33, self.refresh)
 
-class LEDMatrix(ttk.LabelFrame):
-    """Render a snapshot of LED state; the API owns and validates the pixels."""
-
-    def __init__(self, parent):
-        super().__init__(parent, text="8 × 8 RGB LEDs", padding=10)
-        self.pixels = [(0, 0, 0)] * 64
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-        self.canvas = tk.Canvas(self, width=224, height=224,
-                                background="#171c24", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.canvas.bind("<Configure>", self.redraw)
-        ttk.Label(self, text="(0, 0) top left · X → · Y ↓").grid(row=1, column=0, pady=(4, 0))
-
-    def display_pixels(self, pixels):
-        self.pixels = pixels
-        self.redraw()
-
-    def geometry_for_grid(self):
-        width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
-        size = min(width, height)
-        return (width - size) / 2, (height - size) / 2, size / 8
-
-    def redraw(self, _event=None):
-        left, top, cell = self.geometry_for_grid()
-        self.canvas.delete("all")
-        for index, rgb in enumerate(self.pixels):
-            x, y = index % 8, index // 8
-            gap = cell * 0.09
-            self.canvas.create_rectangle(
-                left + x * cell + gap, top + y * cell + gap,
-                left + (x + 1) * cell - gap, top + (y + 1) * cell - gap,
-                fill="#%02x%02x%02x" % tuple(rgb), outline="#394351",
-            )
+    def on_destroy(self, event):
+        if event.widget is self.root and self.timer is not None:
+            self.root.after_cancel(self.timer)
 
 
 def build_gui(root, sense=None):
-    """Board sensor inputs connected to one SenseEmu."""
-    sense = SenseEmu() if sense is None else sense
-    root.title('Sense HAT V2 Emulator')
-    root.minsize(900, 550)
-    root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=1)
-    panel = ttk.Frame(root, padding=8)
-    panel.grid(row=0, column=0, sticky='nsew')
-    panel.columnconfigure(1, weight=1)
-    panel.rowconfigure(1, weight=1)
-
-    toolbar = ttk.Frame(panel)
-    toolbar.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 8))
-    def load_recording():
-        path = filedialog.askopenfilename(parent=root, title='Load sensor recording',
-                                         filetypes=[('Sensor CSV', '*.csv'), ('All files', '*.*')])
-        if path:
-            try:
-                sense.load_csv(path)  # No added noise by default; hardware clocks always apply.
-            except (OSError, ValueError, UnicodeError) as exc:
-                messagebox.showerror('Cannot load recording', str(exc), parent=root)
-
-    def pause_resume():
-        status = sense.get_replay_status()
-        if status['paused']:
-            sense.resume_replay()
-        else:
-            sense.pause_replay()
-
-    ttk.Button(toolbar, text='Load CSV…', command=load_recording).grid(row=0, column=2, padx=6)
-    pause_button = ttk.Button(toolbar, text='Pause', command=pause_resume)
-    pause_button.grid(row=0, column=3)
-    restart_button = ttk.Button(toolbar, text='Restart', command=sense.restart_replay)
-    restart_button.grid(row=0, column=4, padx=4)
-    stop_button = ttk.Button(toolbar, text='Stop CSV', command=sense.stop_replay)
-    stop_button.grid(row=0, column=5)
-
-    left = ttk.Frame(panel)
-    left.grid(row=1, column=0, sticky='ns', padx=(0, 8))
-    left.columnconfigure(0, weight=1)
-    matrix = LEDMatrix(left)
-    matrix.grid(row=0, column=0, sticky='ew')
-    root.controls_area = ttk.Frame(left, height=30)
-    root.controls_area.grid(row=1, column=0, sticky='nsew')
-    left.rowconfigure(1, weight=1)
-
-    sensors = ttk.Frame(panel)
-    sensors.grid(row=1, column=1, sticky='nsew')
-    for index in range(2):
-        sensors.columnconfigure(index, weight=1, uniform='groups')
-        sensors.rowconfigure(index, weight=1)
-    values = {}
-
-    def add_group(row, column, title, settings):
-        group = ttk.LabelFrame(sensors, text=title, padding=3)
-        group.grid(row=row, column=column, sticky='nsew', padx=3, pady=3)
-        for position, sensor in enumerate(settings):
-            key, label, unit, low, high, default, decimals = sensor
-            values[key] = add_sensor(group, position, label, unit, low, high, default, decimals)
-        return group
-
-    add_group(0, 0, 'Environment targets', [
-        ('temperature', 'Temperature', '°C', 0, 65, 20.0, 2),
-        ('pressure', 'Pressure', 'hPa', 260, 1260, 1013.25, 2),
-        ('humidity', 'Humidity', '%', 0, 100, 0.0, 1),
-    ])
-    for row, column, title, prefix, unit, low, high, initial in [
-        (0, 1, 'Board magnetic field', 'mag', 'µT', -MAG_LIMIT, MAG_LIMIT, (33, 0, 0)),
-        (1, 0, 'Board acceleration', 'accel', 'g', -ACCEL_LIMIT, ACCEL_LIMIT, (0, 0, 1)),
-        (1, 1, 'Board gyroscope', 'gyro', 'rad/s', -GYRO_LIMIT, GYRO_LIMIT, (0, 0, 0)),
-    ]:
-        group = add_group(row, column, title, [
-            (f'{prefix}_{axis}', axis.upper(), unit, low, high, default, 4 if prefix in ('accel', 'gyro') else 2)
-            for axis, default in zip('xyz', initial)
-        ])
-    binding = GuiBinding(sense, values, matrix.display_pixels)
-    noise_enabled = tk.BooleanVar(master=root, value=sense.noise)
-    ttk.Checkbutton(panel, text='Sensor noise', variable=noise_enabled,
-                    command=lambda: setattr(sense, 'noise', noise_enabled.get())).grid(
-        row=2, column=0, sticky='w', pady=6)
-    ttk.Button(panel, text='Reset sensors', command=sense.reset_sensors).grid(row=2, column=1, sticky='e')
-    status_text = tk.StringVar(master=root)
-    ttk.Label(panel, textvariable=status_text, wraplength=850).grid(
-        row=3, column=0, columnspan=2, sticky='w')
-    root.sense = sense
-    root.led_matrix = sense
-    timer = None
-
-    def refresh():
-        nonlocal timer
-        binding.refresh()
-        mode = sense.mode
-        noise_enabled.set(sense.noise)
-        for variable in values.values():
-            variable.slider.state(['disabled'] if mode == 'replay' else ['!disabled'])
-        status = sense.get_replay_status()
-        for button in (pause_button, restart_button, stop_button):
-            button.state(['!disabled'] if mode == 'replay' else ['disabled'])
-        pause_button.configure(text='Resume' if status['paused'] else 'Pause')
-        pause_button.state(['disabled'] if status['finished'] or mode != 'replay' else ['!disabled'])
-        if mode == 'replay':
-            phase = 'Finished — holding final target' if status['finished'] else 'Paused' if status['paused'] else 'Playing'
-            status_text.set(f"CSV: {phase} | {status['time_s']:.3f} s | row {status['sample']+1}/{status['samples']} | "
-                            f"noise {'ON' if sense.noise else 'OFF'}")
-        else:
-            status_text.set('Board-axis sensor targets. Gyro controls show radians per second.')
-        timer = root.after(33, refresh)
-
-    def on_destroy(event):
-        if event.widget is root and timer is not None:
-            root.after_cancel(timer)
-    root.bind('<Destroy>', on_destroy, add='+')
-    refresh()
-    return values
+    """Build controls around an existing board, or create a new emulator."""
+    if sense is None:
+        sense = SenseEmu()
+    window = EmulatorGUI(root, sense)
+    # Retain the existing return format for callers using the target variables.
+    return {name: control['target'] for name, control in window.controls.items()}
 
 
 def main(sense=None):

@@ -1,28 +1,40 @@
-"""
-LPS25H pressure and its independent temperature channel.
-Author: Samir Rathore
-"""
+"""Simulated pressure and the temperature measured by the pressure sensor."""
 
 from random import Random
-from .humidity import SampleChannel
 from .hardware_profile import SENSOR_RATES_HZ
 
 
 class PressureSensor:
-    period = 1 / SENSOR_RATES_HZ['pressure']  # LPS25H CTRL_REG1=0xc4.
+    period = 1 / SENSOR_RATES_HZ['pressure']
     keys = ('pressure', 'temperature_pressure')
 
-    def __init__(self, seed, targets):
+    def __init__(self, seed):
         self.random = Random(seed)
-        self.pressure = SampleChannel(targets['pressure'], 25, 260, 1260, 4096)
-        # Consistent encode/decode offset; avoid upstream's restore inconsistency.
-        self.temperature = SampleChannel(targets['temperature_pressure'], 25, -30, 105, 480, 37)
 
-    def sample(self, targets):
-        p, t = targets['pressure'], targets['temperature_pressure']
-        p_error = 0.2 if 800 <= p <= 1100 and 20 <= t <= 60 else 1.0
-        t_error = 2.0 if 0 <= t <= 65 else 4.0
+    def sample(self, environment):
+        true_pressure = environment['pressure']
+        true_temperature = environment['temperature_pressure']
+
+        # Synthetic noise standard deviations; these still need calibration.
+        if 800 <= true_pressure <= 1100 and 20 <= true_temperature <= 60:
+            pressure_noise_std = 0.04  # hPa
+        else:
+            pressure_noise_std = 0.2
+
+        if 0 <= true_temperature <= 65:
+            temperature_noise_std = 0.4  # Degrees Celsius.
+        else:
+            temperature_noise_std = 0.8
+
+        pressure_noise = self.random.gauss(0, pressure_noise_std)
+        temperature_noise = self.random.gauss(0, temperature_noise_std)
+        pressure_reading = true_pressure + pressure_noise
+        temperature_reading = true_temperature + temperature_noise
+
+        pressure_reading = min(1260, max(260, pressure_reading))
+        temperature_reading = min(105, max(-30, temperature_reading))
+
         return {
-            'pressure': self.pressure.sample(p, p_error, self.random),
-            'temperature_pressure': self.temperature.sample(t, t_error, self.random),
+            'pressure': pressure_reading,
+            'temperature_pressure': temperature_reading,
         }
