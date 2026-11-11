@@ -229,7 +229,6 @@ class SenseEmu:
         if seed is not None and type(seed) is not int:
             raise TypeError('seed must be an integer or None')
         self._state = EmulatorState(noise, randbits(64) if seed is None else seed, realtime)
-        self.print_settings()
 
     @property
     def seed(self):
@@ -249,7 +248,6 @@ class SenseEmu:
             self._state.sync()
             self._state.noise = enabled
             self._state._make_models()
-        self.print_settings()
 
     def print_settings(self):
         print(f"[SenseEmu] noise={'ON' if self.noise else 'OFF'} | seed={self.seed} | "

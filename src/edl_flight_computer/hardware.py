@@ -25,8 +25,7 @@ def get_hat(*, noise=True, seed=None, force_emulator=False, require_hardware=Fal
 
     if not force_emulator:
         try:
-            # Installed on the Pi; desktop runs use the emulator instead.
-            from sense_hat import SenseHat  # pyright: ignore[reportMissingImports]
+            from sense_hat import SenseHat
             _hat = SenseHat()
         except (ImportError, OSError, RuntimeError) as error:
             if require_hardware:

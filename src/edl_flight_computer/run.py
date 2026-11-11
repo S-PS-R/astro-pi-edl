@@ -1,49 +1,86 @@
 """Initialize entry, read sensors continuously and optionally show live status."""
 # python -m edl_flight_computer.run --emulator
 
-import argparse
-from math import floor, radians
-from time import monotonic, sleep
-from sense_hat_emulator.hardware_profile import SENSOR_RATES_HZ
+from math import isfinite, radians
+from time import monotonic
+from sense_hat_emulator.emulator import RANGES
 from .hardware import get_hat
 from .mission import initialize
-from .sensors import SensorReader
+from .sensors import SENSOR_GROUP_CHANNELS, SensorReader
+from .EKF import PLANETS, LiftingBodyEKF
 
-
-def monitor(sense, state, source, window=None):
-    reader = SensorReader(sense)
-    monitor_started_at = monotonic()
-    sample_rate = SENSOR_RATES_HZ['accel']
-    next_read_time_s = 0.0
-    next_window_time_s = 0.0
-    next_print_time_s = 0.0
-    previous_connection = None
-    readings = state.initial_measurements.copy()
+def monitor(sense, state, source, estimator, window=None):
+    reader = SensorReader(sense, initial_readings=state.initial_measurements)
+    previous_at = state.mission_started_at
+    previous_errors = {}
 
     while True:
+        # One time reference per iteration. dt advances the estimator; elapsed mission time lets SensorReader decide which groups are due.
         now = monotonic()
-        monitor_time_s = now - monitor_started_at
-        if monitor_time_s < next_read_time_s:
-            sleep(next_read_time_s - monitor_time_s)
-            continue
-
+        dt = now - previous_at
+        previous_at = now
         state.elapsed_s = now - state.mission_started_at
-        error_message = ''
-        try:
-            readings = reader.read(monitor_time_s)
-            sensor_connected = True
-        except (OSError, RuntimeError) as error:
-            # A hardware read failure is expected to be recoverable. Keep the
-            # previous readings and report it; programming errors remain visible.
-            sensor_connected = False
-            error_message = str(error)
 
-        if sensor_connected != previous_connection or monitor_time_s >= next_print_time_s:
-            print(f't={state.elapsed_s:.1f}s | phase={state.phase.value}', flush=True)
-            previous_connection = sensor_connected
-            next_print_time_s = monitor_time_s + 1.0
+        # Due groups are polled; all other groups retain their previous values.
+        readings = reader.read(state.elapsed_s, recover_errors=True)
+        sensor_connected = not reader.errors
+        error_message = '; '.join(f'{group}: {message}' for group, message in reader.errors.items())
 
-        if window is not None and monitor_time_s >= next_window_time_s:
+        # Check every axis and environmental channel against the shared hardware
+        # ranges. A failed group is unavailable even if its cached values look valid.
+        measurement_usable = {}
+        for group, channels in SENSOR_GROUP_CHANNELS.items():
+            for name in channels:
+                value = readings[name]
+                lower, upper = RANGES[name]
+                measurement_usable[name] = (
+                    group not in reader.errors
+                    and isfinite(value)
+                    and lower <= value <= upper
+                )
+
+        # Only successfully polled, usable channels are new observations. Cached
+        # values can be held as prediction inputs without being corrected again.
+        # Values retain sensor units here; convert them before their EKF updates.
+        new_measurements = {
+            name: readings[name]
+            for group in reader.updated_groups
+            for name in SENSOR_GROUP_CHANNELS[group]
+            if measurement_usable[name]
+        }
+
+        # Current Mass
+        current_mass = state.mass
+
+        # Add EKF state/covariance prediction here using dt, even after read errors.
+        estimator.predict(dt, mass = current_mass)
+
+
+        # Add measurement corrections here using new_measurements. For a vector
+        # update, require all its axes to be usable. Held IMU inputs also need
+        # appropriate bias/frame handling and noise modeling during prediction.
+        if 'pressure' in new_measurements:
+            pressure_pa = new_measurements['pressure'] * 100.0
+            # estimator.update_pressure(pressure_pa)
+
+        # Add derived quantities, mission triggers and LED updates here.
+
+        if reader.errors != previous_errors:
+            if reader.errors:
+                print(
+                    f"Sensor Read Failure | t={state.elapsed_s:.3f}s | "
+                    f"{error_message}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Sensor Reads Recovered | t={state.elapsed_s:.3f}s",
+                    flush=True,
+                )
+
+            previous_errors = reader.errors.copy()
+
+        if window is not None:
             snapshot = {
                 'source': source,
                 'connected': sensor_connected,
@@ -52,63 +89,96 @@ def monitor(sense, state, source, window=None):
                 'elapsed_s': state.elapsed_s,
                 'updated_at': now,
                 'readings': readings,
+                'measurement_usable': measurement_usable,
+                'updated_groups': tuple(reader.updated_groups),
+                'sample_times_s': reader.sample_times_s.copy(),
+                'sensor_errors': reader.errors.copy(),
             }
             window.publish(snapshot)
-            next_window_time_s = monitor_time_s + 0.1
-
-        # Add your ongoing entry calculations here when ready.
-
-        # Wait for the next nominal acquisition slot. Skip missed slots rather
-        # than inventing readings to catch up after an operating-system delay.
-        completed_time_s = monotonic() - monitor_started_at
-        completed_slot = floor(completed_time_s * sample_rate)
-        next_read_time_s = (completed_slot + 1) / sample_rate
-        wait_time_s = next_read_time_s - completed_time_s
-        if wait_time_s > 0:
-            sleep(wait_time_s)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--emulator', action='store_true', help='Explicitly use simulated sensors')
-    parser.add_argument('--no-window', action='store_true', help='Show status in the terminal only')
-    parser.add_argument('--entry-altitude-m', type=float, default=120000.0)
-    parser.add_argument('--entry-velocity-m-s', type=float, default=7800.0)
-    parser.add_argument('--entry-fpa-deg', type=float, default=-6.5)
-    args = parser.parse_args(argv)
 
-    if args.emulator:
-        source = 'EMULATOR'
-    else:
-        source = 'REAL SENSE HAT'
-    flight_path_angle_rad = radians(args.entry_fpa_deg)
+    #-----------Intial Condtions defined here-----------
+    use_emulator = True
+    show_window = True
+    planet_name = 'mars'
+    entry_conditions = {
+        "mars": {
+            "altitude_m": 120000.0,
+            "velocity_m_s": 5500.0,
+            "fpa_deg": -14.0,
+            "vehicle_params": {
+                "CD": 1.5,
+                "CL": 0.5,
+                "mass": 1000.0,
+                "S": 15.0
+            },
+        },
+    }
 
-    print(f'INITIALIZING | source={source}')
+    planet = PLANETS[planet_name]
+    entry = entry_conditions[planet_name]
+
+
+    source = "EMULATOR" if use_emulator else "REAL SENSE HAT"
+
     try:
-        sense = get_hat(force_emulator=args.emulator, require_hardware=not args.emulator)
-        state = initialize(sense, args.entry_altitude_m, args.entry_velocity_m_s, flight_path_angle_rad)
+        sense = get_hat(
+            force_emulator=use_emulator,
+            require_hardware=not use_emulator,
+        )
+        state = initialize(
+            sense,
+            altitude_m=entry["altitude_m"],
+            velocity_m_s=entry["velocity_m_s"],
+            flight_path_angle_rad=radians(entry["fpa_deg"]),
+            mass=entry["vehicle_params"]["mass"],
+        )
+        estimator = LiftingBodyEKF(
+                state = state
+                dt = 0.01,
+                planet = planet,
+                vehicle_params = entry["vehicle_params"]
+            )
     except (OSError, RuntimeError, ValueError) as error:
-        parser.exit(1, f'Initialization failed: {error}\n')
+        print(f"Initialization failed: {error}")
+        return 1
 
-    print(f'ATMOSPHERIC_ENTRY | phase={state.phase.value} | t={state.elapsed_s:.1f}s | '
-          f'altitude={state.altitude_m:.1f}m | velocity={state.velocity_m_s:.1f}m/s | '
-          f'FPA={args.entry_fpa_deg:.2f}deg')
+
+    print(
+        f"{source} | planet = {planet_name.upper()} | "
+        f"PHASE = {state.phase.value.upper()} | "
+        f"Entry Interface = {state.altitude_m/1e3:.1f} km | "
+        f"Entry Velcocity = {state.velocity_m_s/1e3:.1f} km/s | "
+        f"Entry FPA = {entry['fpa_deg']:.1f} deg",
+        flush=True,
+        )
+    print(
+        f"Mass = {entry['vehicle_params']['mass']:.1f} kg | "
+        f"CD = {entry['vehicle_params']['CD']:.2f} | "
+        f"CL = {entry['vehicle_params']['CL']:.2f} | "
+        f"Reference Area = {entry['vehicle_params']['S']:.1f} m²",
+        flush=True,
+        )
 
     window = None
-    if not args.no_window:
+    if show_window:
         from .status_window import StatusWindow
+
         try:
             window = StatusWindow()
         except (OSError, RuntimeError) as error:
-            print(f'Cannot open status window: {error}. Continuing in terminal.', flush=True)
+            print(f"Cannot open status window: {error}")
 
     try:
         monitor(sense, state, source, window)
     except KeyboardInterrupt:
-        print('\nFlight program stopped.')
+        print("\nFlight program stopped.")
     finally:
         if window is not None:
             window.close()
+
     return 0
 
 
