@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "edl-sense-hat-emulator"
 version = "0.1.0"
-description = "Sense HAT V2 simulation, entry scenarios and real drop-test recording"
+description = "Mars entry simulation and Sense HAT drop recording"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "scipy>=1.10", "matplotlib>=3.7"]
+dependencies = ["numpy>=1.24", "matplotlib>=3.7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

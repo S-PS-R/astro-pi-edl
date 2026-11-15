@@ -1,29 +1,11 @@
-from math import exp, sin, cos
 import numpy as np
+from .model import PLANETS, ambient_atmosphere, calculate_state
+from math import sin, cos
 
-PLANETS = {
-    "earth": {
-        "radius": 6371000.0, #m
-        "mu": 3.9860e14,
-        "T0": 288.15,
-        "P0": 101325.0,
-        "gas_constant": 287.05,
-        "fact_sheet": "https://nssdc.gsfc.nasa.gov/planetary/factsheet/earthfact.html",
-    },
-    "mars": {
-        "radius": 3389500.0, #m
-        "mu": 4.2828e13, #m³/s²
-        "T0": 214.0, #K
-        "P0": 636.0, #Pa
-        "gas_constant": 191.18, #J/(kg·K)
-        "fact_sheet": "https://nssdc.gsfc.nasa.gov/planetary/factsheet/marsfact.html",
-    },
-}
-
-class LiftingBodyEKF:
+class LandingEKF:
     def __init__(self, state, dt, planet, vehicle_params):
         self.dt = dt
-        self.Planet = planet
+        self.planet = planet
         self.vehicle_params = vehicle_params
         # States: Altitude [m], speed [m/s], FPA [rad].
         self.X = np.array([state.altitude_m, state.velocity_m_s, state.flight_path_angle_rad])
@@ -33,52 +15,23 @@ class LiftingBodyEKF:
 
 
     def ambient_atmosphere(self, h, planet):
-        """Hydrostatic / Barometric model for the ambient atmosphere."""
-        """Return temperature [K], pressure [Pa], density [kg/m³]."""
-        
-        Rp       = planet["radius"]
-        mu      = planet["mu"]
-        T0      = planet["T0"]
-        p0      = planet["P0"]
-        R_gas   = planet["gas_constant"]
-
-        # Constant reference gravity for the exponential atmosphere.
-        g_ref = mu / Rp**2
-        H = R_gas * T0 / g_ref
-
-        pressure = p0 * exp(-h / H)
-        density = pressure / (R_gas * T0)
-
-        return T0, pressure, density, g_ref, H
+        return ambient_atmosphere(h, planet)
 
     def process_model(self, X):
-        """Continuous time equations f(X) derived from Lifting Body FBD"""
-        h, V, gamma = X[0], X[1], X[2]
-        T_amb, P_amb, rho_amb, g_ref, H = self.ambient_atmosphere(h, self.planet)
-
-        # Drag and Lift
-        CD, CL, m, S = self.vehicle_params.CD, self.vehicle_params.CL, self.vehicle_params.mass, self.vehicle_params.S
-        D = 0.5 * rho_amb * V**2 * S * CD
-        L = 0.5 * rho_amb * V**2 * S * CL
-
-        # FPA Rate of Change
-        gamma_dot = L/(m*V) - g_ref/V *cos(gamma)
-
-        # Velocity Rate of Change
-        V_dot = -D/m + g_ref*sin(gamma)
-
-        # Altitude Rate of Change
-        h_dot = V*sin(gamma)
-
-        return np.array([h_dot, V_dot, gamma_dot])
+        derivative, _ = calculate_state(X, self.planet, self.vehicle_params)
+        return derivative
 
     def jaccobian(self, X):
-        """Evaluates df/dX numerically"""
+        """Original Jacobian scaffold; still needs to match process_model."""
         h, V, gamma = X[0], X[1], X[2]
-        Rp = self.Planet["radius"]
-        mu = self.Planet["mu"]
+
+        Rp = self.planet["radius"]
+        mu = self.planet["mu"]
+        CD = self.vehicle_params['CD']
+        CL = self.vehicle_params['CL']
+        L_D = CL/CD
         
-        _, _, _, g, _ = self.ambient_atmosphere(h)
+        _, _, _, g, _ = self.ambient_atmosphere(h, self.planet)
         dg_dh = -2.0 * mu / (Rp + h)**3
 
         A = np.zeros((3, 3))
@@ -89,9 +42,9 @@ class LiftingBodyEKF:
         A[0, 2] = V * cos(gamma)
 
         # Row 2: d(V_dot) / dX
-        A[1, 0] = -dg_dh * (cos(gamma) / self.L_D + sin(gamma))
+        A[1, 0] = -dg_dh * (cos(gamma) / L_D + sin(gamma))
         A[1, 1] = 0.0
-        A[1, 2] = -g * (-sin(gamma) / self.L_D + cos(gamma))
+        A[1, 2] = -g * (-sin(gamma) / L_D + cos(gamma))
 
         # Row 3: d(gamma_dot) / dX
         A[2, 0] = -V * cos(gamma) / (Rp + h)**2
@@ -109,7 +62,7 @@ class LiftingBodyEKF:
     def update(self, sensor):
         """EKF Measurement Correction Step"""
         h, V, gamma = self.X[0], self.X[1], self.X[2]
-        T_amb, P_amb, rho_amb, g_ref = self.ambient_atmosphere(h, self.planet)
+        T_amb, P_amb, rho_amb, g_ref, H = self.ambient_atmosphere(h, self.planet)
 
         # if sensor is within out of range skip [return]
         # Set predicted measurements
@@ -118,9 +71,3 @@ class LiftingBodyEKF:
         # Innovation covariance
         # Kalman Gain
         # Update state and covariance
-
-        
-
-
-
-        

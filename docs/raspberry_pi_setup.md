@@ -18,6 +18,7 @@ its root.
 
 Calibrate using `python tools/calibration/calibrate_imu.py`
 
-Hardware-only tools fail clearly when the board is unavailable. Desktop
-simulation is explicitly launched with `python -m sense_hat_emulator` or the
-CSV replay command in the root README.
+Run the flight program with `python -m edl_flight_computer.run`, using the
+settings described in the root README. The emulator controls open as part of
+the mission when a real Sense HAT is unavailable. The calibration commands
+above are separate preparation tools for the Pi hardware.

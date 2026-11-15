@@ -3,16 +3,8 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# Allow both python -m sense_hat_emulator and direct execution of this file.
-if __package__:
-    from .emulator import SenseEmu, OVR
-    from .imu import ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
-else:
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from sense_hat_emulator.emulator import SenseEmu, OVR
-    from sense_hat_emulator.imu import ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
+from .emulator import OVR
+from .imu import ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
 
 
 class EmulatorGUI:
@@ -24,6 +16,9 @@ class EmulatorGUI:
         self.controls = {}
         self.timer = None
         self.previous_pixels = None
+        self.previous_playback = None
+        self.previous_noise = None
+        self.previous_status = None
         self.initial_values, _ = sense._state.snapshot()
 
         root.title('Sense HAT V2 Emulator')
@@ -116,6 +111,7 @@ class EmulatorGUI:
         self.controls[name] = {
             'target': target_value, 'reading': reading_text, 'slider': slider,
             'unit': unit, 'decimals': decimals,
+            'previous_target': self.initial_values[name], 'previous_reading': None,
         }
 
     def add_vector(self, parent, prefix, unit, limit, decimals):
@@ -154,13 +150,17 @@ class EmulatorGUI:
         for name, control in self.controls.items():
             # Changing the Tk variable does not invoke the slider's mouse command,
             # so external API updates do not get written back into the sensor model.
-            control['target'].set(targets[name])
+            if control['previous_target'] != targets[name]:
+                control['target'].set(targets[name])
+                control['previous_target'] = targets[name]
             value = readings[name]
             if value == OVR:
-                control['reading'].set('OVR')
+                reading = 'OVR'
             else:
-                control['reading'].set(f"{value:.{control['decimals']}f} {control['unit']}")
-            control['slider'].configure(state='disabled' if replay_active else 'normal')
+                reading = f"{value:.{control['decimals']}f} {control['unit']}"
+            if control['previous_reading'] != reading:
+                control['reading'].set(reading)
+                control['previous_reading'] = reading
 
         if pixels != self.previous_pixels:
             for square, colour in zip(self.led_squares, pixels):
@@ -169,15 +169,19 @@ class EmulatorGUI:
                 self.canvas.itemconfigure(square, fill=colour_code)
             self.previous_pixels = pixels
 
-        self.noise_enabled.set(self.sense.noise)
-        button_state = 'normal' if replay_active else 'disabled'
-        self.restart_button.configure(state=button_state)
-        self.stop_button.configure(state=button_state)
-        self.pause_button.configure(text='Resume' if playback['paused'] else 'Pause')
-        if replay_active and not playback['finished']:
-            self.pause_button.configure(state='normal')
-        else:
-            self.pause_button.configure(state='disabled')
+        if self.previous_noise != self.sense.noise:
+            self.noise_enabled.set(self.sense.noise)
+            self.previous_noise = self.sense.noise
+        playback_state = (replay_active, playback['paused'], playback['finished'])
+        if playback_state != self.previous_playback:
+            for control in self.controls.values():
+                control['slider'].configure(state='disabled' if replay_active else 'normal')
+            button_state = 'normal' if replay_active else 'disabled'
+            self.restart_button.configure(state=button_state)
+            self.stop_button.configure(state=button_state)
+            self.pause_button.configure(text='Resume' if playback['paused'] else 'Pause')
+            self.pause_button.configure(state='normal' if replay_active and not playback['finished'] else 'disabled')
+            self.previous_playback = playback_state
 
         if replay_active:
             if playback['finished']:
@@ -186,10 +190,13 @@ class EmulatorGUI:
                 description = 'Paused'
             else:
                 description = 'Playing'
-            self.status.set(f"CSV: {description} | {playback['time_s']:.3f} s | "
-                            f"row {playback['sample'] + 1}/{playback['samples']}")
+            status = (f"CSV: {description} | {playback['time_s']:.3f} s | "
+                      f"row {playback['sample'] + 1}/{playback['samples']}")
         else:
-            self.status.set('Sliders set physical targets; labels show sampled readings. Gyro units: rad/s.')
+            status = 'Sliders set physical targets; labels show sampled readings. Gyro units: rad/s.'
+        if status != self.previous_status:
+            self.status.set(status)
+            self.previous_status = status
 
         self.timer = self.root.after(33, self.refresh)
 
@@ -198,20 +205,6 @@ class EmulatorGUI:
             self.root.after_cancel(self.timer)
 
 
-def build_gui(root, sense=None):
-    """Build controls around an existing board, or create a new emulator."""
-    if sense is None:
-        sense = SenseEmu()
-    window = EmulatorGUI(root, sense)
-    # Retain the existing return format for callers using the target variables.
-    return {name: control['target'] for name, control in window.controls.items()}
-
-
-def main(sense=None):
-    root = tk.Tk()
-    build_gui(root, sense)
-    root.mainloop()
-
-
-if __name__ == '__main__':
-    main()
+def build_gui(root, sense):
+    """Use the same sensor controls in the Pi calibration tool."""
+    return EmulatorGUI(root, sense)

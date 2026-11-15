@@ -1,184 +1,176 @@
-"""Initialize entry, read sensors continuously and optionally show live status."""
-# python -m edl_flight_computer.run --emulator
+"""Configure a mission, run the flight loop, then save and close the displays."""
+# Start with: python -m edl_flight_computer.run
 
-from math import isfinite, radians
-from time import monotonic
-from sense_hat_emulator.emulator import RANGES
-from .hardware import get_hat
-from .mission import initialize
-from .sensors import SENSOR_GROUP_CHANNELS, SensorReader
-from .EKF import PLANETS, LiftingBodyEKF
-
-def monitor(sense, state, source, estimator, window=None):
-    reader = SensorReader(sense, initial_readings=state.initial_measurements)
-    previous_at = state.mission_started_at
-    previous_errors = {}
-
-    while True:
-        # One time reference per iteration. dt advances the estimator; elapsed mission time lets SensorReader decide which groups are due.
-        now = monotonic()
-        dt = now - previous_at
-        previous_at = now
-        state.elapsed_s = now - state.mission_started_at
-
-        # Due groups are polled; all other groups retain their previous values.
-        readings = reader.read(state.elapsed_s, recover_errors=True)
-        sensor_connected = not reader.errors
-        error_message = '; '.join(f'{group}: {message}' for group, message in reader.errors.items())
-
-        # Check every axis and environmental channel against the shared hardware
-        # ranges. A failed group is unavailable even if its cached values look valid.
-        measurement_usable = {}
-        for group, channels in SENSOR_GROUP_CHANNELS.items():
-            for name in channels:
-                value = readings[name]
-                lower, upper = RANGES[name]
-                measurement_usable[name] = (
-                    group not in reader.errors
-                    and isfinite(value)
-                    and lower <= value <= upper
-                )
-
-        # Only successfully polled, usable channels are new observations. Cached
-        # values can be held as prediction inputs without being corrected again.
-        # Values retain sensor units here; convert them before their EKF updates.
-        new_measurements = {
-            name: readings[name]
-            for group in reader.updated_groups
-            for name in SENSOR_GROUP_CHANNELS[group]
-            if measurement_usable[name]
-        }
-
-        # Current Mass
-        current_mass = state.mass
-
-        # Add EKF state/covariance prediction here using dt, even after read errors.
-        estimator.predict(dt, mass = current_mass)
+from datetime import datetime
+from math import radians
+from pathlib import Path
+from threading import Thread
+from time import monotonic, sleep
+from .hardware import get_hat, is_simulated
+from .led_grid import TrajectoryLEDGrid
+from .model import PLANETS, PeakTracker, advance_state, calculate_state
+from .sensors import SensorReader
+from .state import Phase, initialize
+from .status_window import MissionWindow
+from .telemetry import DropLog
 
 
-        # Add measurement corrections here using new_measurements. For a vector
-        # update, require all its axes to be usable. Held IMU inputs also need
-        # appropriate bias/frame handling and noise modeling during prediction.
-        if 'pressure' in new_measurements:
-            pressure_pa = new_measurements['pressure'] * 100.0
-            # estimator.update_pressure(pressure_pa)
+def run_mission(sense, state, vehicle_params, window, led_grid, output_path):
+    """Read sensors, advance the flight, record events, and publish each state."""
+    sensor_reader = SensorReader(sense)
+    peak_tracker = PeakTracker()
+    clock = window.sim_clock
+    state.mission_started_at = monotonic()
+    clock.reset(state.mission_started_at)
+    _, playback_speed = clock.snapshot(state.mission_started_at)
+    update_period_s = 1 / (window.updates_per_sim_second * playback_speed)
+    next_update_time = state.mission_started_at + update_period_s
+    previous_mission_time = 0.0
 
-        # Add derived quantities, mission triggers and LED updates here.
+    # Start both displays at the configured entry interface or drop height.
+    flight_vector = [state.altitude_m, state.velocity_m_s, state.flight_path_angle_rad]
+    _, flight_values = calculate_state(flight_vector, state.planet, vehicle_params)
+    peak_tracker.update_peaks(0.0, flight_values)
+    led_grid.add_sample(0.0, state.altitude_m)
+    window.publish(state, flight_values, peak_tracker.get_peaks())
+    print(f"{state.planet['name'].upper()} | {state.phase.value.upper()} | "
+          f"Altitude = {state.altitude_m:.1f} m | Speed = {state.velocity_m_s:.1f} m/s")
+    print(f'Recording: {output_path}', flush=True)
 
-        if reader.errors != previous_errors:
-            if reader.errors:
-                print(
-                    f"Sensor Read Failure | t={state.elapsed_s:.3f}s | "
-                    f"{error_message}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"Sensor Reads Recovered | t={state.elapsed_s:.3f}s",
-                    flush=True,
-                )
+    with DropLog(output_path) as log:
+        while not window.closed:
+            real_time = monotonic()
+            real_elapsed_s = real_time - state.mission_started_at
+            mission_time_s, selected_speed = clock.snapshot(real_time)
 
-            previous_errors = reader.errors.copy()
+            # A speed change changes the schedule, without resetting mission time.
+            if selected_speed != playback_speed:
+                playback_speed = selected_speed
+                update_period_s = 1 / (window.updates_per_sim_second * playback_speed)
+                next_update_time = real_time + update_period_s
 
-        if window is not None:
-            snapshot = {
-                'source': source,
-                'connected': sensor_connected,
-                'error': error_message,
+            # Sensors keep their real-time polling rates between flight updates.
+            sensor_readings = sensor_reader.read(real_elapsed_s)
+            if real_time < next_update_time:
+                sleep(0.005)
+                continue
+
+            simulation_step_s = mission_time_s - previous_mission_time
+            previous_mission_time = mission_time_s
+            next_update_time += update_period_s
+            if next_update_time <= real_time:
+                next_update_time = real_time + update_period_s
+
+            # RK4 divides this interval into small integration steps.
+            flight_vector = advance_state(flight_vector, simulation_step_s,
+                                          state.planet, vehicle_params)
+            state.altitude_m, state.velocity_m_s, state.flight_path_angle_rad = flight_vector
+            state.elapsed_s = mission_time_s
+            _, flight_values = calculate_state(flight_vector, state.planet, vehicle_params)
+            landed = state.altitude_m <= 0
+
+            # Confirm peaks from the measurements we have seen so far.
+            new_peaks = peak_tracker.update_peaks(mission_time_s, flight_values)
+            event_names = []
+            led_grid.add_sample(mission_time_s, state.altitude_m)
+            for name, peak in new_peaks:
+                led_grid.add_event(name, peak['time_s'], peak['altitude_m'])
+                event_names.append(name)
+                print(f"{name}: {peak['value']:.4f} {peak['units']} at "
+                      f"{peak['time_s']:.2f} s (confirmed at {mission_time_s:.2f} s)", flush=True)
+            if landed:
+                state.phase = Phase.LANDING
+                led_grid.mark_landed()
+                event_names.append('landing')
+                print(f'Ground contact at {mission_time_s:.2f} s', flush=True)
+
+            # Each row pairs the flight state with the latest real sensor readings.
+            log.write({
+                'time_s': mission_time_s,
+                'wall_time_s': real_elapsed_s,
+                'time_scale': playback_speed,
                 'phase': state.phase.value,
-                'elapsed_s': state.elapsed_s,
-                'updated_at': now,
-                'readings': readings,
-                'measurement_usable': measurement_usable,
-                'updated_groups': tuple(reader.updated_groups),
-                'sample_times_s': reader.sample_times_s.copy(),
-                'sensor_errors': reader.errors.copy(),
-            }
-            window.publish(snapshot)
+                'flight_path_angle_rad': state.flight_path_angle_rad,
+                **flight_values,
+                **sensor_readings,
+                **{group + '_sample_s': sample_time
+                   for group, sample_time in sensor_reader.sample_times_s.items()},
+                'events': ';'.join(event_names),
+            })
+            window.publish(state, flight_values, peak_tracker.get_peaks())
+            if landed:
+                break
+            sleep(0.005)
+
+    # The GUI stays open after landing so the results can be reviewed.
+    window.finished = True
 
 
-def main(argv=None):
-
-    #-----------Intial Condtions defined here-----------
-    use_emulator = True
-    show_window = True
+def main():
+    # These are the two configured scenarios. Select the one to run here.
     planet_name = 'mars'
-    entry_conditions = {
-        "mars": {
-            "altitude_m": 120000.0,
-            "velocity_m_s": 5500.0,
-            "fpa_deg": -14.0,
-            "vehicle_params": {
-                "CD": 1.5,
-                "CL": 0.5,
-                "mass": 1000.0,
-                "S": 15.0
-            },
+
+    # Three state updates per simulated second, at the selected playback speed.
+    updates_per_sim_second = 3.0
+    time_scale = 10.0 if planet_name == 'mars' else 1.0
+
+    planet_initial_conditions = {
+        'mars': {
+            'phase': Phase.ENTRY,
+            'altitude_m': 120000.0,
+            'velocity_m_s': 3000.0,
+            'fpa_deg': -1.0,
+            'vehicle_params': {'CD': 1.5, 'CL': 0.5, 'mass': 8000.0, 'S': 15.0,
+                               'Rn': 1, 'target_fpa_deg': -5.0},
+        },
+        'earth': {
+            'phase': Phase.LANDING,
+            'altitude_m': 4.5,
+            'velocity_m_s': 0.0,
+            'fpa_deg': -90.0,
+            'vehicle_params': {'CD': 0.8, 'CL': 0.5, 'mass': 0.1, 'S': 0.1, 'Rn': 1},
         },
     }
-
+    initial_conditions = planet_initial_conditions[planet_name]
     planet = PLANETS[planet_name]
-    entry = entry_conditions[planet_name]
 
+    state = initialize(
+        altitude_m=initial_conditions['altitude_m'],
+        velocity_m_s=initial_conditions['velocity_m_s'],
+        flight_path_angle_rad=radians(initial_conditions['fpa_deg']),
+        mass_kg=initial_conditions['vehicle_params']['mass'],
+        planet=planet,
+        phase=initial_conditions['phase'],
+    )
+    vehicle_params = initial_conditions['vehicle_params']
 
-    source = "EMULATOR" if use_emulator else "REAL SENSE HAT"
+    # Set up the shared hardware and the always-present mission window.
+    sense = get_hat()
+    sense.clear()
+    output_path = Path('logs') / ('run_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.csv')
+    led_grid = TrajectoryLEDGrid(sense, state.altitude_m)
+    window = MissionWindow(planet_name, led_grid, output_path.with_suffix('.png'),
+                           updates_per_sim_second, time_scale)
+    if is_simulated():
+        window.open_emulator(sense)
 
+    mission_thread = Thread(target=run_mission,
+                            args=(sense, state, vehicle_params, window, led_grid, output_path),
+                            name='EDL mission')
+    led_grid.start()
+    mission_thread.start()
     try:
-        sense = get_hat(
-            force_emulator=use_emulator,
-            require_hardware=not use_emulator,
-        )
-        state = initialize(
-            sense,
-            altitude_m=entry["altitude_m"],
-            velocity_m_s=entry["velocity_m_s"],
-            flight_path_angle_rad=radians(entry["fpa_deg"]),
-            mass=entry["vehicle_params"]["mass"],
-        )
-        estimator = LiftingBodyEKF(
-                state = state
-                dt = 0.01,
-                planet = planet,
-                vehicle_params = entry["vehicle_params"]
-            )
-    except (OSError, RuntimeError, ValueError) as error:
-        print(f"Initialization failed: {error}")
-        return 1
-
-
-    print(
-        f"{source} | planet = {planet_name.upper()} | "
-        f"PHASE = {state.phase.value.upper()} | "
-        f"Entry Interface = {state.altitude_m/1e3:.1f} km | "
-        f"Entry Velcocity = {state.velocity_m_s/1e3:.1f} km/s | "
-        f"Entry FPA = {entry['fpa_deg']:.1f} deg",
-        flush=True,
-        )
-    print(
-        f"Mass = {entry['vehicle_params']['mass']:.1f} kg | "
-        f"CD = {entry['vehicle_params']['CD']:.2f} | "
-        f"CL = {entry['vehicle_params']['CL']:.2f} | "
-        f"Reference Area = {entry['vehicle_params']['S']:.1f} m²",
-        flush=True,
-        )
-
-    window = None
-    if show_window:
-        from .status_window import StatusWindow
-
-        try:
-            window = StatusWindow()
-        except (OSError, RuntimeError) as error:
-            print(f"Cannot open status window: {error}")
-
-    try:
-        monitor(sense, state, source, window)
-    except KeyboardInterrupt:
-        print("\nFlight program stopped.")
+        window.root.mainloop()
     finally:
-        if window is not None:
-            window.close()
-
+        # Stop calculations before asking the plot process to save its last points.
+        window.close()
+        mission_thread.join()
+        try:
+            window.save_plots()
+            window.destroy()
+        finally:
+            led_grid.stop()
+            sense.clear()
     return 0
 
 

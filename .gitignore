@@ -13,5 +13,11 @@ __pycache__/
 build/
 dist/
 
+# Folders
+.tmp
+.pdfs
+
+
+
 # emulator
 *.egg-info/

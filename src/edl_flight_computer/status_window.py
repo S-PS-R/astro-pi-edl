@@ -1,169 +1,178 @@
-"""Read-only status display. Closing it does not stop the flight program."""
+"""Read-only mission display, with the shared emulator in a second window."""
 
-from math import isfinite
-from multiprocessing import get_context
-from queue import Empty, Full
-from time import monotonic
+from math import degrees
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk
+from .plot_window import PlotProcess
+from .state import SimulationClock
 
 
 def format_reading(value):
-    if value is None:
-        return '—'
-    if not isfinite(value) or value == -1e6:
-        return 'OVR / invalid'
-    return f'{value:.4f}'
+    return f'{value:.3f}'
 
 
-def format_vector(readings, name):
-    x = format_reading(readings.get(name + '_x'))
-    y = format_reading(readings.get(name + '_y'))
-    z = format_reading(readings.get(name + '_z'))
-    return f'{x} / {y} / {z}'
-
-
-class StatusDisplay:
-    """The widgets and refresh loop, running only in the window process."""
-
-    def __init__(self, root, updates, stop_requested):
-        import tkinter as tk
-        from tkinter import ttk
-
-        self.root = root
-        self.updates = updates
-        self.stop_requested = stop_requested
-        self.latest = None
-
-        root.title('EDL — Flight computer status')
-        root.minsize(500, 490)
-        panel = ttk.Frame(root, padding=16)
+class MissionWindow:
+    def __init__(self, planet_name, led_grid, plot_path, updates_per_sim_second, time_scale):
+        self.sim_clock = SimulationClock(time_scale)
+        self.updates_per_sim_second = updates_per_sim_second
+        update_hz = updates_per_sim_second * time_scale
+        self.closed = False
+        self.finished = False
+        self.observed_peaks = {}
+        self.led_grid = led_grid
+        self.peak_fields = {}
+        self.latest = {}
+        self.displayed = {}
+        self.displayed_peaks = None
+        self.previous_status = None
+        self.fields = {}
+        self.emulator = None
+        self.refresh_ms = round(1000 / update_hz)
+        self.plot_path = Path(plot_path)
+        self.plot_save_requested = False
+        self.root = tk.Tk()
+        self.root.title('EDL Mission - ' + planet_name.upper())
+        self.root.geometry('+30+30')
+        self.root.minsize(440, 420)
+        panel = ttk.Frame(self.root, padding=16)
         panel.pack(fill='both', expand=True)
         panel.columnconfigure(1, weight=1)
-        ttk.Label(panel, text='Flight computer', font=('Segoe UI', 15, 'bold')).grid(
-            row=0, column=0, columnspan=2, sticky='w', pady=(0, 12))
+        ttk.Label(panel, text='EDL Mission', font=('Segoe UI', 15, 'bold')).grid(
+            row=0, column=0, columnspan=3, sticky='w', pady=(0, 8))
+        self.status = tk.StringVar(master=self.root, value='Preparing run...')
+        ttk.Label(panel, textvariable=self.status).grid(row=1, column=0, columnspan=3, sticky='w')
 
-        self.connection = tk.StringVar(master=root, value='Waiting for telemetry')
-        self.connection_label = ttk.Label(panel, textvariable=self.connection)
-        self.connection_label.grid(row=1, column=0, columnspan=2, sticky='w')
-        self.source = self.add_row(panel, 2, 'Source')
-        self.phase = self.add_row(panel, 3, 'Phase')
-        self.elapsed = self.add_row(panel, 4, 'Mission time (s)')
-        self.age = self.add_row(panel, 5, 'Telemetry age (s)')
-        ttk.Separator(panel).grid(row=6, column=0, columnspan=2, sticky='ew', pady=12)
+        labels = {
+            'phase': 'Phase',
+            'elapsed_s': 'Mission time (s)',
+            'altitude_m': 'Altitude / height (m)',
+            'velocity_m_s': 'Speed (m/s)',
+            'flight_path_angle_deg': 'Flight-path angle (deg)',
+            'bank_angle_deg': 'Commanded bank angle (deg)',
+            'heating_kw_m2': 'Convective heat flux (kW/m²)',
+            'acceleration_m_s2': 'Speed acceleration (m/s²)',
+        }
+        for row, (name, label) in enumerate(labels.items(), start=2):
+            self.fields[name] = tk.StringVar(master=self.root, value='-')
+            ttk.Label(panel, text=label).grid(row=row, column=0, sticky='w', padx=(0, 16), pady=5)
+            ttk.Label(panel, textvariable=self.fields[name]).grid(row=row, column=1, sticky='w')
+            if name == 'elapsed_s':
+                controls = ttk.Frame(panel)
+                controls.grid(row=row, column=2, sticky='w', padx=(12, 0))
+                self.speed_selection = tk.IntVar(master=self.root, value=int(time_scale))
+                self.speed_buttons = []
+                for scale in (1, 2, 5, 10):
+                    button = ttk.Radiobutton(
+                        controls, text=f'{scale}×', variable=self.speed_selection,
+                        value=scale, command=lambda speed=scale: self.set_speed(speed))
+                    button.pack(side='left', padx=3)
+                    self.speed_buttons.append(button)
 
-        self.humidity_temperature = self.add_row(panel, 7, 'Temperature — humidity (°C)')
-        self.pressure_temperature = self.add_row(panel, 8, 'Temperature — pressure (°C)')
-        self.pressure = self.add_row(panel, 9, 'Pressure (hPa)')
-        self.humidity = self.add_row(panel, 10, 'Humidity (%)')
-        self.acceleration = self.add_row(panel, 11, 'Acceleration X / Y / Z (g)')
-        self.gyroscope = self.add_row(panel, 12, 'Gyroscope X / Y / Z (rad/s)')
-        self.magnetic_field = self.add_row(panel, 13, 'Magnetic X / Y / Z (µT)')
+        row = len(labels) + 2
+        self.peak_labels = {
+            'peak_decel': 'peak acceleration (deceleration)',
+            'peak_heating': 'peak heating',
+            'peak_velocity': 'peak velocity',
+        }
+        for name, label in self.peak_labels.items():
+            self.peak_fields[name] = tk.StringVar(master=self.root, value=f'Observed {label}: -')
+            ttk.Label(panel, textvariable=self.peak_fields[name]).grid(
+                row=row, column=0, columnspan=3, sticky='w', pady=3)
+            row += 1
+        self.led_axes = tk.StringVar(master=self.root, value='')
+        ttk.Label(panel, textvariable=self.led_axes, wraplength=650).grid(
+            row=row, column=0, columnspan=3, sticky='w', pady=(8, 0))
+        row += 1
+        ttk.Button(panel, text='Stop and close', command=self.close).grid(
+            row=row, column=0, columnspan=3, sticky='w', pady=(12, 0))
+        self.root.protocol('WM_DELETE_WINDOW', self.close)
+        self.plotter = PlotProcess(update_hz=update_hz)
+        self.timer = self.root.after(self.refresh_ms, self.refresh)
 
-        self.error = tk.StringVar(master=root)
-        ttk.Label(panel, textvariable=self.error, foreground='#b3261e', wraplength=480).grid(
-            row=14, column=0, columnspan=2, sticky='w', pady=(10, 0))
-        ttk.Label(panel, text='Closing this window leaves the flight program running.\n'
-                             'Stop the flight program with Ctrl+C in its terminal.').grid(
-            row=15, column=0, columnspan=2, sticky='w', pady=(12, 0))
-        root.protocol('WM_DELETE_WINDOW', root.destroy)
+    def set_speed(self, scale):
+        if self.closed or self.finished:
+            return
+        self.sim_clock.set_scale(scale)
+        self.speed_selection.set(scale)
+        rate = self.updates_per_sim_second * scale
+        self.refresh_ms = round(1000 / rate)
+        self.plotter.set_update_hz(rate)
+        self.root.after_cancel(self.timer)
+        self.timer = self.root.after(self.refresh_ms, self.refresh)
 
-    def add_row(self, parent, row, label):
-        from tkinter import StringVar, ttk
+    def open_emulator(self, sense):
+        from sense_hat_emulator.gui import EmulatorGUI
+        emulator_root = tk.Toplevel(self.root)
+        # Keep the emulator open until Stop and close shuts down the mission.
+        emulator_root.protocol('WM_DELETE_WINDOW', lambda: None)
+        self.root.update_idletasks()
+        x = self.root.winfo_x() + self.root.winfo_width() + 20
+        emulator_root.geometry(f'+{x}+30')
+        self.emulator = EmulatorGUI(emulator_root, sense)
 
-        text = StringVar(master=self.root, value='—')
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=(0, 20), pady=3)
-        ttk.Label(parent, textvariable=text).grid(row=row, column=1, sticky='w')
-        return text
-
-    def update_labels(self, snapshot):
-        telemetry_age = max(0, monotonic() - snapshot['updated_at'])
-        if telemetry_age > 2:
-            self.connection.set('Telemetry stale')
-            self.connection_label.configure(foreground='#b3261e')
-        elif not snapshot['connected']:
-            self.connection.set('Sensor read failed')
-            self.connection_label.configure(foreground='#b3261e')
-        else:
-            self.connection.set('Connected')
-            self.connection_label.configure(foreground='#137333')
-
-        self.source.set(snapshot['source'])
-        self.phase.set(snapshot['phase'].upper())
-        self.elapsed.set(f"{snapshot['elapsed_s']:.1f}")
-        self.age.set(f'{telemetry_age:.1f}')
-        self.error.set(snapshot.get('error', ''))
-
-        readings = snapshot['readings']
-        self.humidity_temperature.set(format_reading(readings.get('temperature_humidity')))
-        self.pressure_temperature.set(format_reading(readings.get('temperature_pressure')))
-        self.pressure.set(format_reading(readings.get('pressure')))
-        self.humidity.set(format_reading(readings.get('humidity')))
-        self.acceleration.set(format_vector(readings, 'accel'))
-        self.gyroscope.set(format_vector(readings, 'gyro'))
-        self.magnetic_field.set(format_vector(readings, 'mag'))
+    def publish(self, state, values, observed_peaks):
+        # The mission thread publishes data; only refresh() touches Tk widgets.
+        self.observed_peaks = observed_peaks
+        self.plotter.add_sample((state.altitude_m, values['density_kg_m3'],
+                                 state.velocity_m_s, values['heating_kw_m2'],
+                                 values['acceleration_m_s2']))
+        self.latest = {
+            'phase': state.phase.value.upper(),
+            'elapsed_s': format_reading(state.elapsed_s),
+            'altitude_m': format_reading(state.altitude_m),
+            'velocity_m_s': format_reading(state.velocity_m_s),
+            'flight_path_angle_deg': format_reading(degrees(state.flight_path_angle_rad)),
+            **{name: format_reading(values[name])
+               for name in ('acceleration_m_s2', 'bank_angle_deg', 'heating_kw_m2')},
+        }
 
     def refresh(self):
-        if self.stop_requested.is_set():
-            self.root.destroy()
+        if self.closed:
             return
-
-        # An empty queue just means no new snapshot has arrived yet.
-        try:
-            self.latest = self.updates.get_nowait()
-        except Empty:
-            pass
-
-        if self.latest is not None:
-            self.update_labels(self.latest)
-        self.root.after(100, self.refresh)
-
-
-def show_window(updates, stop_requested):
-    # Import Tk here so the flight process does not need to initialize a GUI.
-    try:
-        import tkinter as tk
-    except ImportError:
-        print('Tkinter unavailable; flight program continues in terminal.', flush=True)
-        return
-    try:
-        root = tk.Tk()
-    except tk.TclError as error:
-        print(f'Cannot open status window: {error}. Flight program continues.', flush=True)
-        return
-
-    display = StatusDisplay(root, updates, stop_requested)
-    display.refresh()
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        root.destroy()
-
-
-class StatusWindow:
-    """Used by run.py to start the window and send snapshots without waiting."""
-
-    def __init__(self):
-        context = get_context('spawn')
-        self.updates = context.Queue(maxsize=1)
-        self.stop_requested = context.Event()
-        self.process = context.Process(target=show_window,
-                                       args=(self.updates, self.stop_requested), daemon=True)
-        self.process.start()
-
-    def publish(self, snapshot):
-        if not self.process.is_alive():
-            return
-        try:
-            self.updates.put_nowait(snapshot)
-        except Full:
-            # One snapshot is already waiting. Skip this display update;
-            # never make sensor acquisition wait for the window.
-            pass
+        latest = self.latest
+        for name, value in latest.items():
+            if self.displayed.get(name) != value:
+                self.fields[name].set(value)
+        self.displayed = latest
+        label = self.led_grid.axis_label()
+        if self.led_axes.get() != label:
+            self.led_axes.set(label)
+        peaks = self.observed_peaks
+        if peaks != self.displayed_peaks:
+            for name, field in self.peak_fields.items():
+                peak = peaks.get(name)
+                if peak is not None:
+                    field.set(f"Observed {self.peak_labels[name]}: {peak['value']:.3f} {peak['units']} "
+                              f"at {peak['time_s']:.1f} s")
+            self.displayed_peaks = peaks.copy()
+        if self.finished:
+            for button in self.speed_buttons:
+                button.configure(state='disabled')
+            self.save_plots()
+            status = 'Run finished - close this window to exit'
+        else:
+            status = 'Running'
+        if status != self.previous_status:
+            self.status.set(status)
+            self.previous_status = status
+        self.timer = self.root.after(self.refresh_ms, self.refresh)
 
     def close(self):
-        self.stop_requested.set()
-        self.process.join(timeout=1)
-        if self.process.is_alive():
-            self.process.terminate()
-            self.process.join(timeout=1)
-        self.updates.cancel_join_thread()
-        self.updates.close()
+        if not self.closed:
+            self.closed = True
+            self.root.after_cancel(self.timer)
+            # The plot process saves its final points after the flight stops.
+            self.root.quit()
+
+    def save_plots(self):
+        """Request asynchronous saving; final shutdown also guarantees a save."""
+        if not self.closed and not self.plot_save_requested:
+            self.plot_save_requested = self.plotter.save(self.plot_path)
+
+    def destroy(self):
+        """Release Tk widgets after the worker stops and plotting is saved."""
+        try:
+            self.plotter.close(self.plot_path)
+        finally:
+            self.root.destroy()

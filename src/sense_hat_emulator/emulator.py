@@ -477,11 +477,3 @@ class SenseEmu:
         rgb = (0, 0, 0) if not colour else colour[0] if len(colour) == 1 else colour
         rgb = validate_colour(rgb)
         self.set_pixels([rgb] * 64)
-
-    def show_gui(self):
-        """Open the GUI on the main thread; return when the window closes."""
-        from threading import current_thread, main_thread
-        if current_thread() is not main_thread():
-            raise RuntimeError("Call show_gui() on the main thread")
-        from .gui import main
-        main(self)

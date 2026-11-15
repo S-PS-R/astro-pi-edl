@@ -2,14 +2,6 @@
 
 from math import floor
 from sense_hat_emulator.hardware_profile import SENSOR_RATES_HZ
-from .hardware import get_hat
-
-SENSOR_GROUP_CHANNELS = {
-    'imu': ('accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z'),
-    'mag': ('mag_x', 'mag_y', 'mag_z'),
-    'pressure': ('pressure', 'temperature_pressure'),
-    'humidity': ('humidity', 'temperature_humidity'),
-}
 
 class SensorReader:
     """Keep previous readings until each sensor group's next polling time.
@@ -18,11 +10,9 @@ class SensorReader:
     times; they do not guarantee delivery of every physical hardware sample.
     """
 
-    def __init__(self, sense, initial_readings=None):
+    def __init__(self, sense):
         self.sense = sense
-        self.readings = dict(initial_readings) if initial_readings is not None else {}
-        self.updated_groups = set()
-        self.errors = {}
+        self.readings = {}
         self.sample_times_s = {}
         self._groups = {
             'imu': (SENSOR_RATES_HZ['accel'], self._read_imu),
@@ -32,34 +22,20 @@ class SensorReader:
         }
         self._next_read_s = {group: 0.0 for group in self._groups}
 
-    def read(self, now, *, recover_errors=False):
+    def read(self, now):
         """Poll due groups and return cached values for every other group.
 
-        updated_groups contains successful polls from this call only. errors
-        persists per group until a later successful poll. With recover_errors,
-        a failed group retains its previous readings while other groups continue.
-        sample_times_s records successful software poll times, not chip timestamps.
+        sample_times_s records software poll times, not chip timestamps.
         """
-        self.updated_groups.clear()
         for group, (rate, read_group) in self._groups.items():
             # A tolerance avoids missing a tick due to floating-point rounding.
             if now + 1e-10 < self._next_read_s[group]:
                 continue
-            # Advance even on failure and retry at the next nominal group tick.
             # Skip missed ticks rather than inventing samples to catch up.
             self._next_read_s[group] = (floor((now + 1e-10) * rate) + 1) / rate
-            try:
-                group_readings = read_group()
-            except (OSError, RuntimeError) as error:
-                self.errors[group] = str(error)
-                if not recover_errors:
-                    raise
-            else:
-                # Commit the whole group only after all its getters succeed.
-                self.readings.update(group_readings)
-                self.updated_groups.add(group)
-                self.sample_times_s[group] = now
-                self.errors.pop(group, None)
+            group_readings = read_group()
+            self.readings.update(group_readings)
+            self.sample_times_s[group] = now
         return self.readings.copy()
 
     def _read_imu(self):

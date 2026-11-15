@@ -1,10 +1,14 @@
-"""Optional local sensor CSV writer. Not currently called by run.py."""
+"""Record flight calculations and raw board measurements in the same CSV."""
 
 import csv
 from pathlib import Path
 
 HEADER = (
-    'time_s',
+    'time_s', 'wall_time_s', 'time_scale', 'phase', 'altitude_m', 'velocity_m_s', 'flight_path_angle_rad',
+    'temperature_k', 'pressure_pa', 'density_kg_m3', 'gravity_m_s2',
+    'dynamic_pressure_pa', 'drag_n', 'lift_n', 'lift_vertical_n', 'bank_angle_deg',
+    'vertical_velocity_m_s', 'events',
+    'acceleration_m_s2', 'deceleration_m_s2', 'g_load', 'heating_kw_m2',
     'accel_x', 'accel_y', 'accel_z',
     'gyro_x', 'gyro_y', 'gyro_z',
     'mag_x', 'mag_y', 'mag_z',
