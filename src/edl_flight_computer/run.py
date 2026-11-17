@@ -70,6 +70,13 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
             _, flight_values = calculate_state(flight_vector, state.planet, vehicle_params)
             landed = state.altitude_m <= 0
 
+            # In descending flight, h <= 10 * downward_speed means touchdown
+            # is estimated within ten seconds, without a division or speed gate.
+            downward_speed = -flight_values['vertical_velocity_m_s']
+            if not landed and state.altitude_m <= 10.0 * downward_speed:
+                state.phase = Phase.LANDING
+                led_grid.start_landing_countdown()
+
             # Confirm peaks from the measurements we have seen so far.
             new_peaks = peak_tracker.update_peaks(mission_time_s, flight_values)
             event_names = []
@@ -80,7 +87,7 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
                 print(f"{name}: {peak['value']:.4f} {peak['units']} at "
                       f"{peak['time_s']:.2f} s (confirmed at {mission_time_s:.2f} s)", flush=True)
             if landed:
-                state.phase = Phase.LANDING
+                state.phase = Phase.LANDED
                 led_grid.mark_landed()
                 event_names.append('landing')
                 print(f'Ground contact at {mission_time_s:.2f} s', flush=True)

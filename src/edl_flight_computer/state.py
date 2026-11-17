@@ -41,6 +41,7 @@ class Phase(Enum):
     ENTRY = 'entry'
     TD = 'terminal descent'
     LANDING = 'landing'
+    LANDED = 'landed'
 
 @dataclass
 class MissionState:
