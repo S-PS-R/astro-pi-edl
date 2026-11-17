@@ -151,7 +151,7 @@ def main():
     # Set up the shared hardware and the always-present mission window.
     sense = get_hat()
     sense.clear()
-    output_path = Path('logs') / ('run_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.csv')
+    output_path = Path(__file__).resolve().parents[2] / 'logs' / ('run_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.csv')
     led_grid = TrajectoryLEDGrid(sense, state.altitude_m)
     window = MissionWindow(planet_name, led_grid, output_path.with_suffix('.png'),
                            updates_per_sim_second, time_scale)

@@ -27,11 +27,11 @@ class LandingEKF:
 
         Rp = self.planet["radius"]
         mu = self.planet["mu"]
-        CD = self.vehicle_params['CD']
-        CL = self.vehicle_params['CL']
-        L_D = CL/CD
-        
-        _, _, _, g, _ = self.ambient_atmosphere(h, self.planet)
+        m = self.vehicle_params['mass']
+        _, values = calculate_state(X, self.planet, self.vehicle_params)
+        g, D_m, Lv_m = values['gravity_m_s2'], values['drag_n'] / m, values['lift_vertical_n'] / m
+
+        H = self.ambient_atmosphere(h, self.planet)[4]
         dg_dh = -2.0 * mu / (Rp + h)**3
 
         A = np.zeros((3, 3))
@@ -42,22 +42,23 @@ class LandingEKF:
         A[0, 2] = V * cos(gamma)
 
         # Row 2: d(V_dot) / dX
-        A[1, 0] = -dg_dh * (cos(gamma) / L_D + sin(gamma))
-        A[1, 1] = 0.0
-        A[1, 2] = -g * (-sin(gamma) / L_D + cos(gamma))
+        A[1, 0] = D_m / H - dg_dh * sin(gamma)
+        A[1, 1] = -2.0 * D_m / V
+        A[1, 2] = -g * cos(gamma)
 
         # Row 3: d(gamma_dot) / dX
-        A[2, 0] = -V * cos(gamma) / (Rp + h)**2
-        A[2, 1] = cos(gamma) / (Rp + h)
-        A[2, 2] = -(V / (Rp + h)) * sin(gamma)
+        A[2, 0] = -Lv_m / (V * H) - (V / (Rp + h)**2 + dg_dh / V) * cos(gamma)
+        A[2, 1] = Lv_m / V**2 + (1 / (Rp + h) + g / V**2) * cos(gamma)
+        A[2, 2] = -(V / (Rp + h) - g / V) * sin(gamma)
 
         return A
 
     def predict(self):
         """EKF Time Update step"""
         A = self.jaccobian(self.X)
-        self.X = self.X + self.process_model(self.X) + self.dt
-        self.P = A @ self.P @ A.T + self.Q
+        self.X = self.X + self.process_model(self.X) * self.dt
+        F = np.eye(3) + A * self.dt
+        self.P = F @ self.P @ F.T + self.Q
 
     def update(self, sensor):
         """EKF Measurement Correction Step"""
