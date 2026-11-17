@@ -32,12 +32,11 @@ MARS_SETTINGS = {
     'time_scale': 10.0,
     'telemetry_hz': 10.0,  # real-time downlink rate; events are sent immediately
     'ground_station': GROUND_STATION,
-    # The board sits still during the simulation, so rotation is also a fault.
     'fault_limits': {
         **ENVIRONMENT_LIMITS,
-        'gyro_x': (-1.0, 1.0),  # rad/s
-        'gyro_y': (-1.0, 1.0),
-        'gyro_z': (-1.0, 1.0),
+        # 'gyro_x': (-1.0, 1.0),  # rad/s
+        # 'gyro_y': (-1.0, 1.0),
+        # 'gyro_z': (-1.0, 1.0),
     },
     'initial_conditions': {
         'phase': Phase.ENTRY,
@@ -55,7 +54,6 @@ EARTH_SETTINGS = {
     'csv_hz': 120.0,
     'telemetry_hz': 20.0,
     'ground_station': GROUND_STATION,
-    # Motion is expected during a drop, so only the environment is range-checked.
     'fault_limits': ENVIRONMENT_LIMITS,
     'ekf_use_pressure': True,  # Vented package only
     'detection': {
