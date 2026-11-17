@@ -7,13 +7,18 @@ from pathlib import Path
 from statistics import fmean, pstdev
 from time import monotonic, sleep
 
+from ..shared.downlink import Downlink, open_downlink
 from ..shared.hardware import get_hat, is_simulated
-from ..shared.notify import LandingNotifier
 from ..shared.phases import Phase
 from ..shared.sensors import SENSOR_CHANNELS, SensorReader
 from ..shared.telemetry import DropLog
 from .ekf import EKF
-from .live_stream import PlotSender
+
+# Ground station event messages
+EVENT_MESSAGES = {
+    'ready': ('calibrated', 'Calibration complete; waiting for release'),
+    'release': ('release', 'Release detected; descent under way'),
+}
 
 # CSV columns
 GROUPS = ('imu', 'mag', 'pressure', 'humidity')
@@ -169,11 +174,10 @@ def make_row(sequence, elapsed, dt, reader, detector, estimator, events):
     return row
 
 # main run code
-def run_live_drop(sense, output_path, notifier=None, stream_host=None,
-                   stream_port=8765, settings=None, stop_requested=None, ekf_use_pressure=True,
-                  poll_hz=250.0, csv_hz=120.0, stream_hz=20.0):
+def run_live_drop(sense, output_path, downlink=None, settings=None, stop_requested=None,
+                  ekf_use_pressure=True, poll_hz=250.0, csv_hz=120.0):
     # Target rates
-    if min(poll_hz, csv_hz, stream_hz) <= 0:
+    if min(poll_hz, csv_hz) <= 0:
         raise ValueError('Recording rates must be positive')
     poll_period = 1.0 / poll_hz
     csv_period = 1.0 / csv_hz
@@ -181,7 +185,8 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
     # Recording setup
     reader = SensorReader(sense)
     detector = DropDetector(settings)
-    sender = PlotSender(stream_host, stream_port, rate_hz=stream_hz) if stream_host is not None else None
+    if downlink is None:
+        downlink = Downlink(None, mission='earth', run_id=Path(output_path).stem)
     estimator = None
     last_estimate_at = None
     started_at = monotonic()
@@ -196,6 +201,8 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
     previous_led = None
     sense.clear()
     print(f'Live drop recording: {output_path}', flush=True)
+    downlink.event('recording_start', 0.0, 'Recording started; hold still for calibration',
+                   csv=Path(output_path).name)
 
     try:
         with DropLog(output_path, fieldnames=HEADER, flush_interval_s=0.25) as log:
@@ -241,6 +248,21 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
                             estimator.confirm_landed()
                             updated = True
 
+                    # Ground station events, sent as soon as they are detected
+                    for name in events:
+                        if name in EVENT_MESSAGES:
+                            event, message = EVENT_MESSAGES[name]
+                            downlink.event(event, elapsed, message)
+                        elif name == 'landing':
+                            flight_time = detector.confirmed_at - detector.release_at
+                            data = {} if estimator is None else estimator.snapshot()
+                            downlink.event('landing', elapsed,
+                                           f'EARTH landing confirmed at T+{elapsed:.3f} s.\n'
+                                           f'Flight timer: {flight_time:.3f} s, including settling.\n'
+                                           f'CSV: {Path(output_path).name}',
+                                           flight_time_s=flight_time, csv=Path(output_path).name,
+                                           **data)
+
                     pending_events.extend(events)
                     fresh_groups.update(reader.updated_groups)
                     estimate_flags['ekf_updated'] |= updated
@@ -263,9 +285,10 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
                 stopped = stop_requested is not None and stop_requested()
                 finished = detector.phase == Phase.LANDED or stopped
                 log_due = now >= next_csv_at or finished
-                stream_due = sender is not None and (now >= sender.next_send_at or finished)
+                stream_due = downlink.enabled and (now >= downlink.next_telemetry_at or finished)
                 if stopped and detector.phase != Phase.LANDED:
                     pending_events.append('stopped')
+                    downlink.event('stopped', elapsed, 'Recording stopped before landing was confirmed')
 
                 if log_due or stream_due:
                     row = make_row(sequence, elapsed, now-previous_csv_at, reader,
@@ -286,37 +309,30 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
                         if next_csv_at <= now:
                             next_csv_at = now + csv_period
                     if stream_due:
-                        # Laptop snapshots: 20 Hz
-                        sender.publish(row, now, force=finished)
+                        # Ground station telemetry: 20 Hz
+                        downlink.telemetry(elapsed, row, now, force=finished)
                 if finished:
                     break
 
                 # Sleep until the next deadline
                 next_update = min(next_poll_at, next_csv_at)
-                if sender is not None:
-                    next_update = min(next_update, sender.next_send_at)
+                if downlink.enabled:
+                    next_update = min(next_update, downlink.next_telemetry_at)
                 remaining = next_update - monotonic()
                 if remaining > 0:
                     sleep(remaining)
     except KeyboardInterrupt:
         print('Live drop recording stopped.', flush=True)
+        downlink.event('stopped', monotonic() - started_at, 'Recording interrupted (Ctrl+C)')
     finally:
-        # Recording cleanup
-        if sender is not None:
-            sender.close()
+        # Recording cleanup; flushes repeated event copies
+        downlink.close()
         if detector.phase != Phase.LANDED:
             sense.clear()
 
-    # Landing notification
     if detector.phase == Phase.LANDED:
         flight_time = detector.confirmed_at - detector.release_at
         print(f'Landing confirmed after {flight_time:.3f} s, including settling.', flush=True)
-        if notifier is not None:
-            message = (f'Landing confirmed at T+{detector.confirmed_at:.3f} s.\n'
-                       f'Flight timer: {flight_time:.3f} s, including settling.\n'
-                       f'CSV: {output_path}')
-            notifier.send('EDL landing: ', message)
-            notifier.wait()
     return detector
 
 
@@ -381,14 +397,12 @@ def main(settings=None):
     sense = get_hat()
 
     options = {
-        'notifier': LandingNotifier(),
-        'stream_host': settings['laptop_ip'] if settings['live_plotting'] else None,
-        'stream_port': settings['stream_port'],
+        'downlink': open_downlink(settings.get('ground_station'), mission='earth',
+                                  run_id=output_path.stem, telemetry_hz=settings['telemetry_hz']),
         'settings': settings['detection'],
         'ekf_use_pressure': settings['ekf_use_pressure'],
         'poll_hz': settings['poll_hz'],
         'csv_hz': settings['csv_hz'],
-        'stream_hz': settings['stream_hz'],
     }
     if is_simulated():
         run_with_emulator(sense, output_path, **options)

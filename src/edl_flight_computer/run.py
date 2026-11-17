@@ -1,15 +1,27 @@
 """Launch Earth recording (default) or the Mars simulation."""
+# Ground station (laptop): events, status, live plots (--no-plot for console only)
+# python -m edl_flight_computer.shared.ground_station --port 8765
 # python -m edl_flight_computer.run mars
 # python -m edl_flight_computer.run earth
-# python -m edl_flight_computer.earth.live_plot --port 8765
 
 import argparse
 from .shared.phases import Phase
+
+# UDP telemetry/event downlink, shared by both missions
+GROUND_STATION = {
+    'enabled': True,
+    # Laptop's Wi-Fi IPv4 address when running on the Pi.
+    # 127.0.0.1 sends to a ground station on this same computer (desktop simulation).
+    'host': '127.0.0.1',
+    'port': 8765,
+}
 
 # Mars initial conditions
 MARS_SETTINGS = {
     'updates_per_sim_second': 3.0,
     'time_scale': 10.0,
+    'telemetry_hz': 10.0,  # real-time downlink rate; events are sent immediately
+    'ground_station': GROUND_STATION,
     'initial_conditions': {
         'phase': Phase.ENTRY,
         'altitude_m': 120000.0,
@@ -21,13 +33,11 @@ MARS_SETTINGS = {
 
 # Earth recording settings
 EARTH_SETTINGS = {
-    # Target rates: polling / CSV / laptop plots
+    # Target rates: polling / CSV / ground station telemetry
     'poll_hz': 250.0,
     'csv_hz': 120.0,
-    'stream_hz': 20.0,
-    'live_plotting': False,
-    'laptop_ip': '',
-    'stream_port': 8765,
+    'telemetry_hz': 20.0,
+    'ground_station': GROUND_STATION,
     'ekf_use_pressure': True,  # Vented package only
     'detection': {
         'calibration_s': 2.0,

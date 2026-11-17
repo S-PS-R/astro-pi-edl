@@ -1,20 +1,26 @@
 """Mars entry simulation, configuration, and desktop displays."""
 
 from datetime import datetime
-from math import radians
+from math import degrees, radians
 from pathlib import Path
 from threading import Thread
 from time import monotonic, sleep
+from ..shared.downlink import landing_message, open_downlink
 from ..shared.hardware import get_hat, is_simulated
 from .led_grid import TrajectoryLEDGrid
 from .model import MARS, PeakTracker, advance_state, calculate_state
-from ..shared.notify import LandingNotifier, landing_message
 from ..shared.sensors import SensorReader
 from .state import Phase, initialize
 from ..shared.telemetry import DropLog
 
+PEAK_LABELS = {
+    'peak_acceleration': 'Peak deceleration',
+    'peak_heating': 'Peak heating',
+    'peak_velocity': 'Peak velocity',
+}
 
-def run_mission(sense, state, vehicle_params, window, led_grid, output_path, notifier):
+
+def run_mission(sense, state, vehicle_params, window, led_grid, output_path, downlink):
     """Read sensors, advance the flight, log data, and publish each state."""
     sensor_reader = SensorReader(sense)
     peak_tracker = PeakTracker()
@@ -35,6 +41,12 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
     print(f"{state.planet['name'].upper()} | {state.phase.value.upper()} | "
           f"Altitude = {state.altitude_m:.1f} m | Speed = {state.velocity_m_s:.1f} m/s")
     print(f'Recording: {output_path}', flush=True)
+    downlink.event('entry_interface', 0.0,
+                   f'{state.planet["name"].upper()} entry interface: altitude {state.altitude_m:.0f} m, '
+                   f'speed {state.velocity_m_s:.0f} m/s, FPA {degrees(state.flight_path_angle_rad):.2f} deg',
+                   altitude_m=state.altitude_m, velocity_m_s=state.velocity_m_s,
+                   flight_path_angle_rad=state.flight_path_angle_rad)
+    landed = False
 
     with DropLog(output_path) as log:
         while not window.closed:
@@ -71,6 +83,11 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
             # Ten-second landing warning
             downward_speed = -flight_values['vertical_velocity_m_s']
             if not landed and state.altitude_m <= 10.0 * downward_speed:
+                if state.phase != Phase.LANDING:
+                    downlink.event('terminal_descent', mission_time_s,
+                                   f'Ten seconds to landing: altitude {state.altitude_m:.0f} m, '
+                                   f'descent rate {downward_speed:.1f} m/s',
+                                   altitude_m=state.altitude_m, descent_rate_m_s=downward_speed)
                 state.phase = Phase.LANDING
                 led_grid.start_landing_countdown()
 
@@ -81,26 +98,41 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
                 led_grid.add_event(name, peak['time_s'], peak['altitude_m'])
                 print(f"{name}: {peak['value']:.4f} {peak['units']} at "
                       f"{peak['time_s']:.2f} s (confirmed at {mission_time_s:.2f} s)", flush=True)
+                downlink.event(name, mission_time_s,
+                               f"{PEAK_LABELS.get(name, name)}: {peak['value']:.2f} {peak['units']} "
+                               f"at T+{peak['time_s']:.1f} s, altitude {peak['altitude_m']:.0f} m",
+                               peak=peak)
             if landed:
                 state.phase = Phase.LANDED
                 led_grid.mark_landed()
                 print(f'Ground contact at {mission_time_s:.2f} s', flush=True)
-                notifier.send(f"EDL landing: {state.planet['name'].upper()}",
-                              landing_message(state.planet['name'], mission_time_s,
-                                              state.velocity_m_s, peak_tracker.get_peaks()))
 
-            # CSV and display update
-            log.write({
+            # CSV, ground station, and display update
+            row = {
                 'time_s': mission_time_s,
                 'phase': state.phase.value,
                 'flight_path_angle_rad': state.flight_path_angle_rad,
                 **flight_values,
                 **sensor_readings,
-            })
+            }
+            log.write(row)
+            downlink.telemetry(mission_time_s, row, force=landed)
+            if landed:
+                downlink.event('landing', mission_time_s,
+                               landing_message(state.planet['name'], mission_time_s,
+                                               state.velocity_m_s, peak_tracker.get_peaks()),
+                               velocity_m_s=state.velocity_m_s, peaks=peak_tracker.get_peaks(),
+                               csv=output_path.name)
             window.publish(state, flight_values, peak_tracker.get_peaks())
             if landed:
                 break
             sleep(0.005)
+
+    # Stopped from the mission window before ground contact
+    if not landed:
+        downlink.event('stopped', state.elapsed_s,
+                       f'Run stopped before landing at altitude {state.altitude_m:.0f} m')
+    downlink.close()
 
     # Finished display
     window.finished = True
@@ -141,12 +173,12 @@ def main(settings=None):
     if is_simulated():
         window.open_emulator(sense)
 
-    notifier = LandingNotifier()
-    if not notifier.configured:
-        print('Landing email disabled: set EDL_SMTP_USER and EDL_SMTP_PASSWORD to enable it.')
+    downlink = open_downlink(settings.get('ground_station'), mission=planet_name,
+                             run_id=output_path.stem,
+                             telemetry_hz=settings.get('telemetry_hz', 10.0))
     mission_thread = Thread(target=run_mission,
                             args=(sense, state, vehicle_params, window, led_grid,
-                                  output_path, notifier),
+                                  output_path, downlink),
                             name='EDL mission')
     led_grid.start()
     mission_thread.start()
@@ -162,7 +194,6 @@ def main(settings=None):
         finally:
             led_grid.stop()
             sense.clear()
-            notifier.wait()
     return 0
 
 

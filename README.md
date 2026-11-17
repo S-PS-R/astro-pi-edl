@@ -45,11 +45,12 @@ src/edl_flight_computer/
     run.py
     __init__.py
     earth/
-        drop.py, ekf.py, live_stream.py, live_plot.py
+        drop.py, ekf.py
     mars/
         sim.py, model.py, state.py, led_grid.py, status_window.py, plot_window.py
     shared/
-        hardware.py, sensors.py, telemetry.py, notify.py, phases.py
+        hardware.py, sensors.py, telemetry.py, phases.py,
+        downlink.py, ground_station.py, live_plot.py
 ```
 
 The old flat module paths have been replaced by these package paths. The
@@ -61,7 +62,6 @@ remain unchanged.
 | `run.py` | Earth/Mars configuration and launcher; defaults to Earth |
 | `earth/drop.py` | Earth recording loop, release and landing detection |
 | `earth/ekf.py` | Earth's vertical displacement/velocity estimator |
-| `earth/live_stream.py` / `earth/live_plot.py` | Earth UDP snapshots and laptop visualization |
 | `mars/sim.py` | Mars flight loop and desktop mission lifecycle |
 | `mars/model.py` | Mars simulation's atmosphere, flight equations, RK4, and peak tracking |
 | `mars/state.py` | Mars mission state and playback clock |
@@ -71,23 +71,55 @@ remain unchanged.
 | `mars/led_grid.py` | Altitude/time LED trail and event colors |
 | `shared/sensors.py` / `shared/hardware.py` | Sensor polling and real-board/emulator connection |
 | `shared/telemetry.py` | CSV output |
-| `shared/notify.py` | Landing email over Gmail SMTP |
+| `shared/downlink.py` | UDP telemetry and event packets to the ground station |
+| `shared/ground_station.py` | Laptop ground station: events, link status, packet log, live plots |
+| `shared/live_plot.py` | Ground station's telemetry plots (visualization only) |
 
-## Landing email
+## Ground station downlink
 
-At ground contact the program emails the touchdown time, speed, and confirmed
-peaks. It sends in the background and only prints a message if the network is down.
-Enable it with a Gmail account that has 2-Step Verification and an
-[app password](https://myaccount.google.com/apppasswords):
+Both missions send UDP packets to a "ground station" laptop: periodic
+**telemetry** snapshots and critical **events**. Mars events are entry interface,
+confirmed peak velocity, heating, and deceleration, the ten-second terminal descent
+warning, landing (with a summary of the confirmed peaks), and stop. Earth events
+are recording start, calibration complete, release, confirmed landing (with
+flight time), and stop. Each event is also printed in the flight terminal.
 
-```powershell
-$env:EDL_SMTP_USER = 'you@gmail.com'
-$env:EDL_SMTP_PASSWORD = 'abcd efgh ijkl mnop'   # app password, not your login
-$env:EDL_EMAIL_TO = 'you@gmail.com'              # optional, comma separated
+Configure the shared `GROUND_STATION` dictionary in `run.py`:
+
+| Setting | Meaning |
+| --- | --- |
+| `enabled` | `False` creates no socket |
+| `host` | Laptop's Wi-Fi IPv4 address for Pi runs; `127.0.0.1` (the default) for a ground station on the same computer, e.g. the Mars simulator or emulator runs |
+| `port` | UDP port, default 8765; must match the receiver |
+
+Telemetry rates are `MARS_SETTINGS['telemetry_hz']` (10 Hz real time, independent
+of playback speed) and `EARTH_SETTINGS['telemetry_hz']` (20 Hz). Events are sent
+immediately and repeated three times, 0.25 s apart, with the same `event_id`; the
+ground station shows the first copy. Every packet is one JSON object:
+
+```json
+{"v": 1, "type": "event", "mission": "mars", "run": "run_20261117_...", "seq": 42,
+ "time_s": 512.3, "event_id": 4, "event": "landing", "message": "...", "data": {...}}
 ```
 
-On the Pi use `export NAME=value` instead. Without these variables, the run
-works normally and skips the email.
+Telemetry packets have `"type": "telemetry"` and carry the full CSV row (Mars) or
+plot snapshot (Earth) in `data`. `run` is the flight CSV's file name, and `seq`
+counts every datagram so the receiver can report packet loss. Network errors never
+stop the flight loop. The Pi's CSV remains the authoritative record.
+
+Start a ground station on the laptop before the run:
+
+```sh
+python -m edl_flight_computer.shared.ground_station --port 8765
+```
+
+The terminal prints events as they arrive, with a landing banner, and a
+once-per-second status line showing key telemetry, packet loss, and `NO SIGNAL`
+after two silent seconds. A plot window (`shared/live_plot.py`) shows the
+telemetry: Earth sensor panels for drops, and altitude, speed, heat flux, load
+factor, and board pressure/temperature for Mars. A new run clears the plots.
+Received packets are appended to `logs/ground_<timestamp>.jsonl`. Options:
+`--no-plot` for console only, `--log PATH`, `--no-log`.
 
 `peak_tracker` remembers the highest heating, strongest braking acceleration, and speed seen so
 far. It reports a peak once the signal stays 1% below that maximum for one
@@ -166,8 +198,8 @@ Stopping or cancelling before ground contact does not turn it green.
 LEDs clear when the application closes or a new
 run starts. The
 terminal reports the maximum's time and the later confirmation time. The CSV
-records the calculated values and phase; peak events remain in the terminal and
-LED display. A later, higher maximum rearms detection. A maximum at the
+records the calculated values and phase; peak events appear in the terminal, the
+LED display, and the ground station downlink. A later, higher maximum rearms detection. A maximum at the
 end of a run remains unconfirmed if no sustained decrease has been observed.
 
 Mars keeps the configured entry-interface altitude, speed, and FPA. The
@@ -209,7 +241,7 @@ in `EARTH_SETTINGS` in `run.py`:
 | --- | --- | --- |
 | `poll_hz` | 250 Hz | Check sensors and update detection/EKF |
 | `csv_hz` | 120 Hz | Write CSV snapshots |
-| `stream_hz` | 20 Hz | Send optional laptop plotting snapshots |
+| `telemetry_hz` | 20 Hz | Send ground station telemetry snapshots |
 
 The loop sleeps between monotonic deadlines. Faster hardware does not produce
 unlimited duplicate CSV rows. Missed deadlines are skipped; no catch-up samples
@@ -247,7 +279,7 @@ smooth parachute descent can resemble rest to the IMU. Pressure is recorded but
 does not control landing detection. The bottom-right green LED flashes on release
 as a descent warning, then stays solid after confirmed landing and recording
 ends. This Earth warning is not a measured ten-second touchdown prediction.
-The existing optional landing email is sent once after confirmation.
+A `landing` event is sent to the ground station at confirmation.
 
 ### Earth EKF estimates
 
@@ -279,21 +311,22 @@ against the packaged Pi.
 ## Real-time plots on a laptop
 
 Install this package on the laptop, connect both devices to the same Wi-Fi, and
-start the receiver on the laptop:
+start the ground station on the laptop:
 
 ```sh
-python -m edl_flight_computer.earth.live_plot --port 8765
+python -m edl_flight_computer.shared.ground_station --port 8765
 ```
 
 Allow Python's UDP traffic on the laptop's private-network firewall. In the Pi's
-`run.py`, set `EARTH_SETTINGS['live_plotting'] = True`, set `laptop_ip` in that
-dictionary to the laptop's local Wi-Fi IPv4 address, and keep `stream_port = 8765`
-(or match the receiver's port). With `live_plotting = False`, no stream is created.
+`run.py`, set `GROUND_STATION['host']` to the laptop's local Wi-Fi IPv4 address
+and keep `port = 8765` (or match the receiver's port). See
+[Ground station downlink](#ground-station-downlink).
 
 The laptop plots acceleration, gyro, magnetometer, pressure, both temperatures,
-and humidity, plus phase and flight time. Plot snapshots are sent at 20 Hz; the
-Pi's full-rate CSV remains independent. The receiver retains ten minutes of
-history and marks gaps after a disconnection. Packet loss or closing the laptop
+and humidity, plus phase and flight time, and prints downlinked events in its
+terminal. Plot snapshots are sent at 20 Hz; the
+Pi's full-rate CSV remains independent. The plots retain the most recent 16,000
+snapshots (over 13 minutes at 20 Hz) and break the line where snapshots are missing. Packet loss or closing the laptop
 does not stop Pi recording. All rendering happens on the laptop; the Pi creates
 no mission plots or PNGs. Real-hardware Earth runs remain headless; emulator
 fallback opens only the sensor-control window locally.
