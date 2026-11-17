@@ -18,6 +18,7 @@ class TrajectoryLEDGrid:
         self.points = []
         self.events = []
         self.landed = False
+        self._countdown_started_at = None
         self._lock = Lock()
         self._stop = Event()
         self._thread = None
@@ -48,6 +49,12 @@ class TrajectoryLEDGrid:
         with self._lock:
             self.landed = True
 
+    def start_landing_countdown(self):
+        """Latch the green warning until ground contact, without blocking."""
+        with self._lock:
+            if self._countdown_started_at is None:
+                self._countdown_started_at = monotonic()
+
     @staticmethod
     def cell(time_s, altitude_m, time_span_s, altitude_max_m):
         x = max(0, min(7, int(8 * time_s / time_span_s)))
@@ -58,7 +65,8 @@ class TrajectoryLEDGrid:
         with self._lock:
             return (f'LED grid: time 0–{self.time_span_s:g} s →; '
                     f'altitude {self.altitude_max_m / 1000:g}–0 km ↓. '
-                    'Shared peak cells cycle colors; bottom-right green = landed.')
+                    'Shared peak cells cycle colors; bottom-right flashing green = '
+                    'landing countdown, solid green = landed.')
 
     def render(self, wall_time_s=None):
         with self._lock:
@@ -66,6 +74,7 @@ class TrajectoryLEDGrid:
             events = self.events.copy()
             span, height = self.time_span_s, self.altitude_max_m
             landed = self.landed
+            countdown_started_at = self._countdown_started_at
         pixels = [(0, 0, 0)] * 64
         for time_s, altitude_m in points:
             x, y = self.cell(time_s, altitude_m, span, height)
@@ -80,13 +89,18 @@ class TrajectoryLEDGrid:
             names = buckets.setdefault(y*8 + x, [])
             if name not in names:
                 names.append(name)
-        tick = int((monotonic() if wall_time_s is None else wall_time_s) / 0.6)
+        now = monotonic() if wall_time_s is None else wall_time_s
+        tick = int(now / 0.6)
         for index, names in buckets.items():
             colours = [self.COLOURS[name] for name in names]
             pixels[index] = colours[tick % len(colours)]
         if landed:
             # Reserve the corner as an unambiguous completion indicator with green LED
             pixels[7*8 + 7] = (0, 255, 0)
+        elif countdown_started_at is not None:
+            # Use wall time so pulses remain visible at accelerated playback speeds.
+            on = (now - countdown_started_at) % 1.0 < 0.5
+            pixels[7*8 + 7] = (0, 255, 0) if on else (0, 0, 0)
         if pixels != self._previous:
             self.sense.set_pixels(pixels)
             self._previous = pixels
