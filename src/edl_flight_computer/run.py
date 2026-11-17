@@ -1,5 +1,5 @@
 """Configure a mission, run the flight loop, then save and close the displays."""
-# Start with: python -m edl_flight_computer.run
+# Start with: EDL_SMTP_USER='adhit.sirip@gmail.com' EDL_SMTP_PASSWORD='qgdh gaoo lkjf gstv' EDL_EMAIL_TO='<recipient email, just one or multiple comma separated>' python -m edl_flight_computer.run
 
 from datetime import datetime
 from math import radians
