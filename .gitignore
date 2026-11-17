@@ -17,6 +17,8 @@ dist/
 .tmp
 .pdfs
 
+# Logs
+src/logs/
 
 
 # emulator
