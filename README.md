@@ -36,6 +36,23 @@ and close** in the mission window to save and close the group.
 | `led_grid.py` | Altitude/time LED trail and event colors |
 | `sensors.py` / `hardware.py` | Sensor polling and real-board/emulator connection |
 | `telemetry.py` | CSV output |
+| `notify.py` | Landing email over Gmail SMTP |
+
+## Landing email
+
+At ground contact the program emails the touchdown time, speed, and confirmed
+peaks. It sends in the background and only prints a message if the network is down.
+Enable it with a Gmail account that has 2-Step Verification and an
+[app password](https://myaccount.google.com/apppasswords):
+
+```powershell
+$env:EDL_SMTP_USER = 'you@gmail.com'
+$env:EDL_SMTP_PASSWORD = 'abcd efgh ijkl mnop'   # app password, not your login
+$env:EDL_EMAIL_TO = 'you@gmail.com'              # optional, comma separated
+```
+
+On the Pi use `export NAME=value` instead. Without these variables, the run
+works normally and skips the email.
 
 `peak_tracker` remembers the highest heating, deceleration, and speed seen so
 far. It reports a peak once the signal stays 1% below that maximum for one

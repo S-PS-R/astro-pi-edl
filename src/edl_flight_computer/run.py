@@ -9,13 +9,14 @@ from time import monotonic, sleep
 from .hardware import get_hat, is_simulated
 from .led_grid import TrajectoryLEDGrid
 from .model import PLANETS, PeakTracker, advance_state, calculate_state
+from .notify import LandingNotifier, landing_message
 from .sensors import SensorReader
 from .state import Phase, initialize
 from .status_window import MissionWindow
 from .telemetry import DropLog
 
 
-def run_mission(sense, state, vehicle_params, window, led_grid, output_path):
+def run_mission(sense, state, vehicle_params, window, led_grid, output_path, notifier):
     """Read sensors, advance the flight, record events, and publish each state."""
     sensor_reader = SensorReader(sense)
     peak_tracker = PeakTracker()
@@ -83,6 +84,9 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path):
                 led_grid.mark_landed()
                 event_names.append('landing')
                 print(f'Ground contact at {mission_time_s:.2f} s', flush=True)
+                notifier.send(f"EDL landing: {state.planet['name'].upper()}",
+                              landing_message(state.planet['name'], mission_time_s,
+                                              state.velocity_m_s, peak_tracker.get_peaks()))
 
             # Each row pairs the flight state with the latest real sensor readings.
             log.write({
@@ -154,8 +158,12 @@ def main():
     if is_simulated():
         window.open_emulator(sense)
 
+    notifier = LandingNotifier()
+    if not notifier.configured:
+        print('Landing email disabled: set EDL_SMTP_USER and EDL_SMTP_PASSWORD to enable it.')
     mission_thread = Thread(target=run_mission,
-                            args=(sense, state, vehicle_params, window, led_grid, output_path),
+                            args=(sense, state, vehicle_params, window, led_grid,
+                                  output_path, notifier),
                             name='EDL mission')
     led_grid.start()
     mission_thread.start()
@@ -171,6 +179,7 @@ def main():
         finally:
             led_grid.stop()
             sense.clear()
+            notifier.wait()
     return 0
 
 
