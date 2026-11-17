@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Thread
 from time import monotonic, sleep
 from ..shared.downlink import landing_message, open_downlink
+from ..shared.faults import FaultMonitor, report as report_faults
 from ..shared.hardware import get_hat, is_simulated
 from .led_grid import TrajectoryLEDGrid
 from .model import MARS, PeakTracker, advance_state, calculate_state
@@ -20,9 +21,11 @@ PEAK_LABELS = {
 }
 
 
-def run_mission(sense, state, vehicle_params, window, led_grid, output_path, downlink):
+def run_mission(sense, state, vehicle_params, window, led_grid, output_path, downlink,
+                fault_monitor=None):
     """Read sensors, advance the flight, log data, and publish each state."""
     sensor_reader = SensorReader(sense)
+    fault_monitor = fault_monitor or FaultMonitor({})
     peak_tracker = PeakTracker()
     clock = window.sim_clock
     state.mission_started_at = monotonic()
@@ -62,6 +65,10 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, dow
 
             # Sensor polling
             sensor_readings = sensor_reader.read(real_elapsed_s)
+
+            # Sensor faults: checked in real time at every poll
+            report_faults(fault_monitor.update(real_elapsed_s, sensor_readings),
+                          downlink, mission_time_s)
             if real_time < next_update_time:
                 sleep(0.005)
                 continue
@@ -116,7 +123,8 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, dow
                 **sensor_readings,
             }
             log.write(row)
-            downlink.telemetry(mission_time_s, row, force=landed)
+            downlink.telemetry(mission_time_s, {**row, 'faults': sorted(fault_monitor.active)},
+                               force=landed)
             if landed:
                 downlink.event('landing', mission_time_s,
                                landing_message(state.planet['name'], mission_time_s,
@@ -178,7 +186,8 @@ def main(settings=None):
                              telemetry_hz=settings.get('telemetry_hz', 10.0))
     mission_thread = Thread(target=run_mission,
                             args=(sense, state, vehicle_params, window, led_grid,
-                                  output_path, downlink),
+                                  output_path, downlink,
+                                  FaultMonitor(settings.get('fault_limits'))),
                             name='EDL mission')
     led_grid.start()
     mission_thread.start()

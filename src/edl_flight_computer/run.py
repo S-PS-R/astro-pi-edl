@@ -16,12 +16,29 @@ GROUND_STATION = {
     'port': 8765,
 }
 
+# Fault detection: nominal (low, high) range per sensor channel; None = no limit.
+# Outside for 0.5 s raises a 'fault' event; back inside for 0.5 s sends 'fault_cleared'.
+# Tune temperatures against the packaged board's idle reading (Pi CPU heat raises them).
+ENVIRONMENT_LIMITS = {
+    'temperature_pressure': (None, 40.0),  # °C, overtemp (heat source / warm water)
+    'temperature_humidity': (None, 40.0),  # °C
+    'humidity': (None, 70.0),              # %RH (breath, water)
+    'pressure': (900.0, 1100.0),           # hPa (sensor sanity / sealed-box leak)
+}
+
 # Mars initial conditions
 MARS_SETTINGS = {
     'updates_per_sim_second': 3.0,
     'time_scale': 10.0,
     'telemetry_hz': 10.0,  # real-time downlink rate; events are sent immediately
     'ground_station': GROUND_STATION,
+    # The board sits still during the simulation, so rotation is also a fault.
+    'fault_limits': {
+        **ENVIRONMENT_LIMITS,
+        'gyro_x': (-1.0, 1.0),  # rad/s
+        'gyro_y': (-1.0, 1.0),
+        'gyro_z': (-1.0, 1.0),
+    },
     'initial_conditions': {
         'phase': Phase.ENTRY,
         'altitude_m': 120000.0,
@@ -38,6 +55,8 @@ EARTH_SETTINGS = {
     'csv_hz': 120.0,
     'telemetry_hz': 20.0,
     'ground_station': GROUND_STATION,
+    # Motion is expected during a drop, so only the environment is range-checked.
+    'fault_limits': ENVIRONMENT_LIMITS,
     'ekf_use_pressure': True,  # Vented package only
     'detection': {
         'calibration_s': 2.0,

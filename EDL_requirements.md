@@ -10,13 +10,13 @@
 10. Send a message at landing in the form of a text, email, or social media post
 
 Completed
-1. 
+1. (NOT STARTED) Live demo pending
 2. (DONE)
-3. Need to get from team
-4.
-5.(DONE)
-6.(DONE)
-7.Need to be done with temperature fault
-8.Need to do
-9.(DONE)
-10.(DONE)
+3. (NOT STARTED) Need to get from team
+4. (PARTIAL) Downlinked to ground station: entry interface, peak heating, peak deceleration, peak velocity, start of terminal descent (10 s to landing), landing. Not modeled: parachute deploy, separation
+5. (DONE)
+6. (DONE)
+7. (DONE) Range checks on temperature, humidity, pressure (both missions) and gyro motion (Mars); limits in run.py fault_limits; tune temperature limit on packaged board
+8. (DONE) fault / fault_cleared events in UDP telecom stream; active faults in every telemetry packet and ground station status line. Response is reporting only (no LED or flight action)
+9. (DONE)
+10. (AT RISK) Landing email replaced by UDP landing event to ground station laptop; may not count as text, email, or social media post

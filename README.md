@@ -121,6 +121,20 @@ factor, and board pressure/temperature for Mars. A new run clears the plots.
 Received packets are appended to `logs/ground_<timestamp>.jsonl`. Options:
 `--no-plot` for console only, `--log PATH`, `--no-log`.
 
+## Fault detection
+
+Each mission range-checks raw sensor readings against `fault_limits` in `run.py`,
+which maps a channel to its nominal `(low, high)` range (`None` = no limit). A
+reading outside its range for 0.5 s sends a `fault` event; back in range for
+0.5 s sends `fault_cleared`. Active faults are listed in every telemetry
+packet's `faults` field and on the ground station status line. Both missions
+check temperature (overtemp), humidity, and pressure (`ENVIRONMENT_LIMITS`).
+Mars also checks gyro rotation, because the board should sit still during the
+simulation; Earth does not, since the drop is supposed to move. Checks run on
+real time at every sensor poll. With the emulator, trigger a fault by moving a
+sensor slider out of range. Tune the temperature limit to the packaged board's
+idle reading: Pi CPU heat raises it.
+
 `peak_tracker` remembers the highest heating, strongest braking acceleration, and speed seen so
 far. It reports a peak once the signal stays 1% below that maximum for one
 simulated second. It also keeps the time and altitude where the maximum occurred.

@@ -132,6 +132,8 @@ class GroundStation:
         if name == 'landing':
             bar = '*' * 60
             print(f'\n{bar}\n{line}\n{message}\n{bar}', flush=True)
+        elif name == 'fault':
+            print(f'\n!!! {line}: {message}', flush=True)
         else:
             print(f'\n{line}: {message}', flush=True)
 
@@ -149,6 +151,8 @@ class GroundStation:
             value = data.get(key)
             if value is not None:
                 parts.append(f'{label} {fmt.format(value)}')
+        if data.get('faults'):
+            parts.append('FAULT ' + ', '.join(data['faults']))
         total = link.received + link.lost
         parts.append(f'loss {100.0 * link.lost / total:.1f}%' if total else 'loss -')
         if silent > 2.0:

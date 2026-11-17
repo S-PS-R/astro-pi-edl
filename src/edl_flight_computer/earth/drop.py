@@ -8,6 +8,7 @@ from statistics import fmean, pstdev
 from time import monotonic, sleep
 
 from ..shared.downlink import Downlink, open_downlink
+from ..shared.faults import FaultMonitor, report as report_faults
 from ..shared.hardware import get_hat, is_simulated
 from ..shared.phases import Phase
 from ..shared.sensors import SENSOR_CHANNELS, SensorReader
@@ -175,7 +176,7 @@ def make_row(sequence, elapsed, dt, reader, detector, estimator, events):
 
 # main run code
 def run_live_drop(sense, output_path, downlink=None, settings=None, stop_requested=None,
-                  ekf_use_pressure=True, poll_hz=250.0, csv_hz=120.0):
+                  ekf_use_pressure=True, poll_hz=250.0, csv_hz=120.0, fault_limits=None):
     # Target rates
     if min(poll_hz, csv_hz) <= 0:
         raise ValueError('Recording rates must be positive')
@@ -185,6 +186,7 @@ def run_live_drop(sense, output_path, downlink=None, settings=None, stop_request
     # Recording setup
     reader = SensorReader(sense)
     detector = DropDetector(settings)
+    fault_monitor = FaultMonitor(fault_limits)
     if downlink is None:
         downlink = Downlink(None, mission='earth', run_id=Path(output_path).stem)
     estimator = None
@@ -218,6 +220,7 @@ def run_live_drop(sense, output_path, downlink=None, settings=None, stop_request
                              and elapsed - imu_time <= detector.settings['max_imu_gap_s'])
                     fresh = 'imu' in reader.updated_groups
                     events = detector.update(elapsed, readings, fresh, valid)
+                    report_faults(fault_monitor.update(elapsed, readings), downlink, elapsed)
 
                     # EKF initialization
                     updated = gap = pressure_updated = False
@@ -293,7 +296,8 @@ def run_live_drop(sense, output_path, downlink=None, settings=None, stop_request
                 if log_due or stream_due:
                     row = make_row(sequence, elapsed, now-previous_csv_at, reader,
                                    detector, estimator, pending_events)
-                    row.update(imu_valid=valid, poll_dt_s=poll_dt, **estimate_flags)
+                    row.update(imu_valid=valid, poll_dt_s=poll_dt, faults=sorted(fault_monitor.active),
+                               **estimate_flags)
                     for group in GROUPS:
                         row[group + '_fresh'] = group in fresh_groups
                     if log_due:
@@ -403,6 +407,7 @@ def main(settings=None):
         'ekf_use_pressure': settings['ekf_use_pressure'],
         'poll_hz': settings['poll_hz'],
         'csv_hz': settings['csv_hz'],
+        'fault_limits': settings.get('fault_limits'),
     }
     if is_simulated():
         run_with_emulator(sense, output_path, **options)
