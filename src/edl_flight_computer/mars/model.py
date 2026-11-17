@@ -3,28 +3,16 @@
 from math import exp, sin, cos, sqrt, radians, degrees, acos, ceil
 import numpy as np
 
-# "https://nssdc.gsfc.nasa.gov/planetary/factsheet/marsfact.html"
-PLANETS = {
-    "earth": {
-        "name": "earth",
-        "radius": 6371000.0, #m
-        "gravity": 9.80665, #m/s^2
-        "mu": 3.9860e14,
-        "T0": 288.15,
-        "P0": 101325.0,
-        "gas_constant": 287.05,
-        "C_SG": 1.7415e-4,
-    },
-    "mars": {
-        "name": "mars",
-        "radius": 3389500.0, #m
-        "gravity": 3.73, #m/s^2
-        "mu": 4.2828e13, #m³/s²
-        "T0": 214.0, #K
-        "P0": 636.0, #Pa
-        "gas_constant": 191.18, #J/(kg·K)
-        "C_SG": 1.9027e-4,
-    }
+# Mars constants
+MARS = {
+    "name": "mars",
+    "radius": 3389500.0, #m
+    "gravity": 3.73, #m/s^2
+    "mu": 4.2828e13, #m³/s²
+    "T0": 214.0, #K
+    "P0": 636.0, #Pa
+    "gas_constant": 191.18, #J/(kg·K)
+    "C_SG": 1.9027e-4,
 }
 
 def ambient_atmosphere(h, planet):
@@ -41,19 +29,18 @@ def ambient_atmosphere(h, planet):
 def calculate_state(X, planet, vehicle_params):
     """Calculate state derivatives and instantaneous flight quantities."""
     h, V, gamma = X
-    T, pressure, rho, g_ref, H = ambient_atmosphere(h, planet)
+    T, pressure, rho, _, _ = ambient_atmosphere(h, planet)
     Rp = planet["radius"]
     g = planet["mu"] / (Rp + h)**2
     CD, CL = vehicle_params["CD"], vehicle_params["CL"]
     m, S = vehicle_params["mass"], vehicle_params["S"]
 
-    # Drag and lift.
+    # Drag and lift
     dynamic_pressure = 0.5 * rho * V**2
     D = dynamic_pressure * S * CD
     L = dynamic_pressure * S * CL
 
-    # Planar bank guidance: rotate lift to track a descending FPA instead of
-    # keeping the entire lift force upward. L remains the total lift force.
+    # Bank guidance
     bank_cos = 1.0
     if 'target_fpa_deg' in vehicle_params and L > 0 and V > 0:
         target = radians(vehicle_params['target_fpa_deg'])
@@ -61,13 +48,14 @@ def calculate_state(X, planet, vehicle_params):
         vertical_lift = m * (V * gamma_rate + (g - V**2/(Rp + h)) * cos(gamma))
         bank_cos = max(-1.0, min(1.0, vertical_lift / L))
 
-    # Positive speed; flight-path angle is positive above the local horizontal.
+    # Flight equations
     h_dot = V * sin(gamma)
     V_dot = -D/m - g * sin(gamma)
     gamma_dot = 0.0
     if V > 0.0:
         gamma_dot = L*bank_cos/(m*V) + (V/(Rp + h) - g/V) * cos(gamma)
 
+    # Convective heating
     Rn = vehicle_params['Rn']
     C_SG = planet['C_SG']
     heating = C_SG * sqrt(rho / Rn) * V**3 / 1e3
@@ -100,13 +88,17 @@ def advance_state(X, dt, planet, vehicle_params, max_step=0.02):
         return X
     steps = max(1, ceil(dt / max_step))
     step = dt / steps
+    
     for _ in range(steps):
+        # RK4 step
         k1 = calculate_state(X, planet, vehicle_params)[0]
         k2 = calculate_state(X + step*k1/2, planet, vehicle_params)[0]
         k3 = calculate_state(X + step*k2/2, planet, vehicle_params)[0]
         k4 = calculate_state(X + step*k3, planet, vehicle_params)[0]
         updated = X + step*(k1 + 2*k2 + 2*k3 + k4)/6
+
         if updated[0] <= 0:
+            # Ground crossing
             fraction = X[0] / (X[0] - updated[0])
             X += fraction * (updated - X)
             X[0] = 0.0
@@ -132,12 +124,12 @@ class PeakTracker:
         events = []
         for name, (key, units) in self.CHANNELS.items():
             value = flight_values[key]
-            # Ignore an initial zero, but allow a fall to zero to confirm a peak.
+            # Initial sample
             if value == 0 and name not in self.peaks:
                 continue
             peak = self.peaks.get(name)
             if peak is None or value > peak['value']:
-                # Keep the maximum's time and altitude, not the later detection time.
+                # New peak
                 self.peaks[name] = dict(value=value, units=units, time_s=mission_time_s,
                                         altitude_m=flight_values['altitude_m'],
                                         confirmed=False)
@@ -149,10 +141,10 @@ class PeakTracker:
                         peak['confirmed'] = True
                         events.append((name, peak.copy()))
                 else:
-                    # A brief dip is not enough; start over if the value recovers.
+                    # Reset confirmation
                     self.decline_started_at.pop(name, None)
         return events
 
     def get_peaks(self):
-        # Give the GUI its own copy while tracking continues in the mission thread.
+        # Display snapshot
         return {name: peak.copy() for name, peak in self.peaks.items()}

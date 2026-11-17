@@ -14,9 +14,9 @@ from .pressure import PressureSensor
 from .imu import IMUSensor, MagnetometerSensor, ACCEL_LIMIT, GYRO_LIMIT, MAG_LIMIT
 import csv
 from pathlib import Path
-from numbers import Real
 from threading import RLock
 
+# Sensor channels
 ENVIRONMENT = ('temperature_humidity', 'temperature_pressure', 'pressure', 'humidity')
 RAW_IMU = tuple(f'{prefix}_{axis}' for prefix in ('accel', 'gyro', 'mag') for axis in 'xyz')
 CSV_REQUIRED = ('time_s', *ENVIRONMENT, *RAW_IMU)
@@ -46,14 +46,13 @@ DEFAULTS = {
 }
 
 
+# Physical targets
 def checked_values(changes):
     """Validate the entire change before touching state."""
     checked = {}
     for key, value in changes.items():
         if key not in DEFAULTS:
             raise KeyError(f'Unknown sensor: {key}')
-        if isinstance(value, bool) or not isinstance(value, Real):
-            raise TypeError(f'{key} must be a real number')
         value = float(value)
         if not isfinite(value):
             raise ValueError(f'{key} must be finite')
@@ -70,6 +69,7 @@ def checked_values(changes):
     return checked
 
 
+# CSV replay
 def read_csv_samples(path):
     """Validate a complete timestamped recording before starting playback."""
     samples = []
@@ -112,6 +112,7 @@ def read_csv_samples(path):
     return samples
 
 
+# Sensor clocks
 class EmulatorState:
     def __init__(self, noise, seed, realtime):
         self.lock = RLock()
@@ -161,7 +162,7 @@ class EmulatorState:
                 return
             while self.replay_index+1 < len(self.replay) and self.replay[self.replay_index+1][0] <= end+1e-10:
                 time_s, row, colour = self.replay[self.replay_index+1]
-                # At an exact boundary, apply the new CSV row before its sensor tick.
+                # Replay row before sensor tick
                 self._sample_to(time_s, before=True)
                 self.targets.update(row)
                 if colour is not None:
@@ -220,14 +221,11 @@ def pixel_index(x, y):
     return y * 8 + x
 
 
+# Board API
 class SenseEmu:
     """A simulated board. Pass this same object to code that should share it."""
 
     def __init__(self, noise=True, seed=None, realtime=True):
-        if type(noise) is not bool or type(realtime) is not bool:
-            raise TypeError('noise and realtime must be True or False')
-        if seed is not None and type(seed) is not int:
-            raise TypeError('seed must be an integer or None')
         self._state = EmulatorState(noise, randbits(64) if seed is None else seed, realtime)
 
     @property
@@ -240,8 +238,6 @@ class SenseEmu:
 
     @noise.setter
     def noise(self, enabled):
-        if type(enabled) is not bool:
-            raise TypeError('noise must be True or False')
         with self._state.lock:
             if enabled == self._state.noise:
                 return
@@ -258,8 +254,6 @@ class SenseEmu:
 
     def advance(self, seconds):
         """Advance deterministic simulation time; requires realtime=False."""
-        if isinstance(seconds, bool) or not isinstance(seconds, Real):
-            raise TypeError('seconds must be a real number')
         seconds = float(seconds)
         if not isfinite(seconds) or seconds < 0:
             raise ValueError('seconds must be finite and nonnegative')
@@ -267,8 +261,6 @@ class SenseEmu:
             if self._state.realtime:
                 raise RuntimeError('advance() requires SenseEmu(realtime=False)')
             elapsed = self._state.elapsed + seconds
-            if not isfinite(elapsed):
-                raise ValueError('Simulation time overflow')
             self._state.run_to(elapsed)
 
     @property
@@ -277,8 +269,6 @@ class SenseEmu:
 
     def load_csv(self, path, noise=False):
         """Load physical targets at CSV timestamps; all readings use fixed sensor clocks."""
-        if type(noise) is not bool:
-            raise TypeError('noise must be True or False')
         samples = read_csv_samples(path)
         with self._state.lock:
             state = self._state
@@ -369,6 +359,7 @@ class SenseEmu:
     def _set(self, name, value):
         self._state.update({name: value})
 
+    # Environmental sensors
     def get_temperature(self):
         return self._get("temperature")
 
@@ -416,6 +407,7 @@ class SenseEmu:
             vector = dict(x=x, y=y, z=z)
         self._state.update({f"{prefix}_{axis}": vector[axis] for axis in "xyz"})
 
+    # Raw IMU
     def get_accelerometer_raw(self):
         """Return x/y/z acceleration in g."""
         return self._get_vector("accel")
@@ -437,12 +429,6 @@ class SenseEmu:
     def set_gyroscope_raw(self, x, y=None, z=None):
         self._set_vector("gyro", x, y, z)
 
-    # Descriptive emulator aliases; official raw names above remain available.
-    get_acceleration = get_accelerometer_raw
-    set_acceleration = set_accelerometer_raw
-    get_magnetic_field = get_compass_raw
-    set_magnetic_field = set_compass_raw
-
     temperature = property(get_temperature, set_temperature)
     pressure = property(get_pressure, set_pressure)
     humidity = property(get_humidity, set_humidity)
@@ -451,6 +437,7 @@ class SenseEmu:
         """Restore readings, leaving LED output unchanged."""
         self._state.reset()
 
+    # LED matrix
     def set_pixel(self, x, y, *colour):
         index = pixel_index(x, y)
         rgb = validate_colour(colour[0] if len(colour) == 1 else colour)

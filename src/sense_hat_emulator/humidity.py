@@ -9,7 +9,7 @@ from .hardware_profile import SENSOR_RATES_HZ
 
 class HumiditySensor:
 
-    # The emulator calls sample() on this fixed clock, only when noise is enabled.
+    # Sensor timing
     period = 1 / SENSOR_RATES_HZ['humidity']  # HTS221 CTRL_REG1=0x87.
     keys = ('humidity', 'temperature_humidity')
 
@@ -21,7 +21,7 @@ class HumiditySensor:
         true_humidity = environment['humidity']
         true_temperature = environment['temperature_humidity']
 
-        # Random noise (need to quantify)
+        # Synthetic noise
         if 20 <= true_humidity <= 80:
             humidity_noise_std = 0.7  # Percentage points of relative humidity.
         else:
@@ -39,7 +39,7 @@ class HumiditySensor:
         humidity_reading = true_humidity + humidity_noise
         temperature_reading = true_temperature + temperature_noise
 
-        # Limit the readings to the modeled sensor ranges.
+        # Sensor limits
         humidity_reading = min(100, max(0, humidity_reading))
         temperature_reading = min(120, max(-40, temperature_reading))
 

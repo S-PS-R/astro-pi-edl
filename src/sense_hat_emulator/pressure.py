@@ -15,7 +15,7 @@ class PressureSensor:
         true_pressure = environment['pressure']
         true_temperature = environment['temperature_pressure']
 
-        # Synthetic noise standard deviations; these still need calibration.
+        # Synthetic noise
         if 800 <= true_pressure <= 1100 and 20 <= true_temperature <= 60:
             pressure_noise_std = 0.04  # hPa
         else:
@@ -31,6 +31,7 @@ class PressureSensor:
         pressure_reading = true_pressure + pressure_noise
         temperature_reading = true_temperature + temperature_noise
 
+        # Sensor limits
         pressure_reading = min(1260, max(260, pressure_reading))
         temperature_reading = min(105, max(-30, temperature_reading))
 

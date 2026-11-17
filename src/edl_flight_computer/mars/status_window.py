@@ -13,14 +13,13 @@ def format_reading(value):
 
 
 class MissionWindow:
-    def __init__(self, planet_name, led_grid, plot_path, updates_per_sim_second, time_scale):
+    def __init__(self, planet_name, plot_path, updates_per_sim_second, time_scale):
         self.sim_clock = SimulationClock(time_scale)
         self.updates_per_sim_second = updates_per_sim_second
         update_hz = updates_per_sim_second * time_scale
         self.closed = False
         self.finished = False
         self.observed_peaks = {}
-        self.led_grid = led_grid
         self.peak_fields = {}
         self.latest = {}
         self.displayed = {}
@@ -31,6 +30,7 @@ class MissionWindow:
         self.refresh_ms = round(1000 / update_hz)
         self.plot_path = Path(plot_path)
         self.plot_save_requested = False
+        # Main window
         self.root = tk.Tk()
         self.root.title('EDL Mission - ' + planet_name.upper())
         self.root.geometry('+30+30')
@@ -43,6 +43,7 @@ class MissionWindow:
         self.status = tk.StringVar(master=self.root, value='Preparing run...')
         ttk.Label(panel, textvariable=self.status).grid(row=1, column=0, columnspan=3, sticky='w')
 
+        # Mission readouts
         labels = {
             'phase': 'Phase',
             'elapsed_s': 'Mission time (s)',
@@ -70,6 +71,7 @@ class MissionWindow:
                     self.speed_buttons.append(button)
 
         row = len(labels) + 2
+        # Peak readouts
         self.peak_labels = {
             'peak_decel': 'peak acceleration (deceleration)',
             'peak_heating': 'peak heating',
@@ -80,10 +82,6 @@ class MissionWindow:
             ttk.Label(panel, textvariable=self.peak_fields[name]).grid(
                 row=row, column=0, columnspan=3, sticky='w', pady=3)
             row += 1
-        self.led_axes = tk.StringVar(master=self.root, value='')
-        ttk.Label(panel, textvariable=self.led_axes, wraplength=650).grid(
-            row=row, column=0, columnspan=3, sticky='w', pady=(8, 0))
-        row += 1
         ttk.Button(panel, text='Stop and close', command=self.close).grid(
             row=row, column=0, columnspan=3, sticky='w', pady=(12, 0))
         self.root.protocol('WM_DELETE_WINDOW', self.close)
@@ -104,7 +102,7 @@ class MissionWindow:
     def open_emulator(self, sense):
         from sense_hat_emulator.gui import EmulatorGUI
         emulator_root = tk.Toplevel(self.root)
-        # Keep the emulator open until Stop and close shuts down the mission.
+        # Shared window lifecycle
         emulator_root.protocol('WM_DELETE_WINDOW', lambda: None)
         self.root.update_idletasks()
         x = self.root.winfo_x() + self.root.winfo_width() + 20
@@ -112,7 +110,7 @@ class MissionWindow:
         self.emulator = EmulatorGUI(emulator_root, sense)
 
     def publish(self, state, values, observed_peaks):
-        # The mission thread publishes data; only refresh() touches Tk widgets.
+        # Latest display snapshot
         self.observed_peaks = observed_peaks
         self.plotter.add_sample((state.altitude_m, values['density_kg_m3'],
                                  state.velocity_m_s, values['heating_kw_m2'],
@@ -135,9 +133,6 @@ class MissionWindow:
             if self.displayed.get(name) != value:
                 self.fields[name].set(value)
         self.displayed = latest
-        label = self.led_grid.axis_label()
-        if self.led_axes.get() != label:
-            self.led_axes.set(label)
         peaks = self.observed_peaks
         if peaks != self.displayed_peaks:
             for name, field in self.peak_fields.items():
@@ -162,7 +157,7 @@ class MissionWindow:
         if not self.closed:
             self.closed = True
             self.root.after_cancel(self.timer)
-            # The plot process saves its final points after the flight stops.
+            # Stop display loop
             self.root.quit()
 
     def save_plots(self):

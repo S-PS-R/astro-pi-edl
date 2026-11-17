@@ -21,6 +21,7 @@ class EmulatorGUI:
         self.previous_status = None
         self.initial_values, _ = sense._state.snapshot()
 
+        # Main window
         root.title('Sense HAT V2 Emulator')
         root.minsize(900, 550)
         root.columnconfigure(0, weight=1)
@@ -30,7 +31,7 @@ class EmulatorGUI:
         panel.columnconfigure(1, weight=1)
         panel.rowconfigure(1, weight=1)
 
-        # Playback buttons.
+        # Playback controls
         toolbar = ttk.Frame(panel)
         toolbar.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 8))
         ttk.Button(toolbar, text='Load CSV', command=self.load_csv).grid(row=0, column=0, padx=3)
@@ -41,7 +42,7 @@ class EmulatorGUI:
         self.stop_button = ttk.Button(toolbar, text='Stop CSV', command=sense.stop_replay)
         self.stop_button.grid(row=0, column=3, padx=3)
 
-        # Create the 64 LED squares once; refresh only changes their colours.
+        # LED matrix
         led_frame = ttk.LabelFrame(panel, text='8 x 8 RGB LEDs', padding=10)
         led_frame.grid(row=1, column=0, sticky='nw', padx=(0, 10))
         self.canvas = tk.Canvas(led_frame, width=224, height=224,
@@ -56,7 +57,7 @@ class EmulatorGUI:
                     fill='#000000', outline='#394351')
                 self.led_squares.append(square)
 
-        # Four groups of independent sensor inputs.
+        # Sensor controls
         sensors = ttk.Frame(panel)
         sensors.grid(row=1, column=1, sticky='nsew')
         sensors.columnconfigure(0, weight=1)
@@ -76,7 +77,7 @@ class EmulatorGUI:
         self.add_vector(acceleration, 'accel', 'g', ACCEL_LIMIT, 4)
         self.add_vector(gyroscope, 'gyro', 'rad/s', GYRO_LIMIT, 4)
 
-        # Noise and reset controls.
+        # Noise and reset
         self.noise_enabled = tk.BooleanVar(master=root, value=sense.noise)
         ttk.Checkbutton(panel, text='Sensor noise', variable=self.noise_enabled,
                         command=self.change_noise).grid(row=2, column=0, sticky='w', pady=8)
@@ -124,7 +125,7 @@ class EmulatorGUI:
                                          filetypes=[('Sensor CSV', '*.csv')])
         if not path:
             return
-        # A bad user-selected file should show a useful message, not close the GUI.
+        # File loading
         try:
             self.sense.load_csv(path)
         except (OSError, ValueError, UnicodeError) as error:
@@ -142,14 +143,14 @@ class EmulatorGUI:
 
     def refresh(self):
         """Read current values, update widgets, then schedule the next display refresh."""
+        # Latest readings
         targets, pixels = self.sense._state.snapshot()
         readings = self.sense.get_readings()
         playback = self.sense.get_replay_status()
         replay_active = self.sense.mode == 'replay'
 
         for name, control in self.controls.items():
-            # Changing the Tk variable does not invoke the slider's mouse command,
-            # so external API updates do not get written back into the sensor model.
+            # Target and sampled value
             if control['previous_target'] != targets[name]:
                 control['target'].set(targets[name])
                 control['previous_target'] = targets[name]

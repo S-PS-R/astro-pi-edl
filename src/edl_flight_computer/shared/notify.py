@@ -1,11 +1,4 @@
-"""Email a landing notification through Gmail SMTP (standard library only).
-
-Set these environment variables before running (never commit them):
-    EDL_SMTP_USER      Gmail address that sends the message
-    EDL_SMTP_PASSWORD  16-character Google app password (not the account password)
-    EDL_EMAIL_TO       Recipient(s), comma separated; defaults to EDL_SMTP_USER
-Optional: EDL_SMTP_HOST (default smtp.gmail.com), EDL_SMTP_PORT (default 465).
-"""
+"""Optional landing email through Gmail SMTP."""
 
 import os
 import smtplib
@@ -16,6 +9,7 @@ from threading import Thread
 
 class LandingNotifier:
     def __init__(self, timeout_s=15.0):
+        # SMTP settings
         self.user = os.environ.get('EDL_SMTP_USER')
         self.password = os.environ.get('EDL_SMTP_PASSWORD')
         self.recipients = os.environ.get('EDL_EMAIL_TO') or self.user
@@ -33,11 +27,13 @@ class LandingNotifier:
         if not self.configured:
             print('Landing email skipped: set EDL_SMTP_USER and EDL_SMTP_PASSWORD.', flush=True)
             return
+        # Landing message
         message = EmailMessage()
         message['Subject'] = subject
         message['From'] = self.user
         message['To'] = self.recipients
         message.set_content(body)
+        # Background delivery
         self._thread = Thread(target=self._send, args=(message,), name='EDL email')
         self._thread.start()
 
@@ -50,7 +46,7 @@ class LandingNotifier:
                 server.send_message(message)
             print(f"Landing email sent to {message['To']}", flush=True)
         except (OSError, smtplib.SMTPException) as error:
-            # The Pi may be offline after a drop; the mission must not fail because of it.
+            # Offline demo
             print(f'Landing email failed: {error}', flush=True)
 
     def wait(self):

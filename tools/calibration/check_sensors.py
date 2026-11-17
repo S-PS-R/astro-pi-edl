@@ -13,7 +13,7 @@ from itertools import cycle
 import argparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from edl_flight_computer.hardware import get_hat, is_simulated
+from edl_flight_computer.shared.hardware import get_hat, is_simulated
 OVR = -1e6
 
 # Advance once per sensor sample; restart at red when the process starts.

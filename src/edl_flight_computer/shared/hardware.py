@@ -15,7 +15,7 @@ def get_hat(*, noise=True, seed=None, force_emulator=False, require_hardware=Fal
     if force_emulator and require_hardware:
         raise ValueError('Choose either hardware or emulator, not both')
 
-    # Reuse the board so all callers see the same sensors and LEDs.
+    # Existing connection
     if _hat is not None:
         if require_hardware and _simulated:
             raise RuntimeError('Real Sense HAT required; the emulator is already in use')
@@ -23,6 +23,7 @@ def get_hat(*, noise=True, seed=None, force_emulator=False, require_hardware=Fal
             raise RuntimeError('Real hardware is already in use; start a new process for simulation')
         return _hat
 
+    # Real hardware
     if not force_emulator:
         try:
             from sense_hat import SenseHat
@@ -38,6 +39,7 @@ def get_hat(*, noise=True, seed=None, force_emulator=False, require_hardware=Fal
             _simulated = False
             return _hat
 
+    # Sensor emulator
     from sense_hat_emulator import SenseEmu
     _hat = SenseEmu(noise=noise, seed=seed)
     _simulated = True

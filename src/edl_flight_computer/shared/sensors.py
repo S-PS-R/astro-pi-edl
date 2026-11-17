@@ -1,7 +1,12 @@
 """Read board sensors and poll each group at its fixed nominal rate."""
 
-from math import floor
+from math import floor, isfinite
 from sense_hat_emulator.hardware_profile import SENSOR_RATES_HZ
+from sense_hat_emulator.emulator import RANGES
+
+SENSOR_CHANNELS = ('accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z',
+                   'mag_x', 'mag_y', 'mag_z', 'pressure', 'temperature_pressure',
+                   'temperature_humidity', 'humidity')
 
 class SensorReader:
     """Keep previous readings until each sensor group's next polling time.
@@ -14,6 +19,8 @@ class SensorReader:
         self.sense = sense
         self.readings = {}
         self.sample_times_s = {}
+        self.updated_groups = set()
+        self.errors = {}
         self._groups = {
             'imu': (SENSOR_RATES_HZ['accel'], self._read_imu),
             'mag': (SENSOR_RATES_HZ['mag'], self._read_magnetic),
@@ -22,20 +29,36 @@ class SensorReader:
         }
         self._next_read_s = {group: 0.0 for group in self._groups}
 
-    def read(self, now):
+    def read(self, now, *, recover_errors=False):
         """Poll due groups and return cached values for every other group.
 
         sample_times_s records software poll times, not chip timestamps.
         """
+        self.updated_groups.clear()
         for group, (rate, read_group) in self._groups.items():
-            # A tolerance avoids missing a tick due to floating-point rounding.
+            # Due sensor groups
             if now + 1e-10 < self._next_read_s[group]:
                 continue
-            # Skip missed ticks rather than inventing samples to catch up.
+            # Next poll time
             self._next_read_s[group] = (floor((now + 1e-10) * rate) + 1) / rate
-            group_readings = read_group()
+            # Read and validate
+            try:
+                group_readings = read_group()
+                if recover_errors:
+                    for name, value in group_readings.items():
+                        lower, upper = RANGES[name]
+                        if not isfinite(value) or not lower <= value <= upper:
+                            raise ValueError(f'{name} outside sensor range')
+            except (OSError, RuntimeError, ValueError) as error:
+                if not recover_errors:
+                    raise
+                self.errors[group] = str(error)
+                continue
+            # Cache successful readings
             self.readings.update(group_readings)
             self.sample_times_s[group] = now
+            self.updated_groups.add(group)
+            self.errors.pop(group, None)
         return self.readings.copy()
 
     def _read_imu(self):

@@ -1,7 +1,7 @@
 """Mission state, kept separate from raw sensor measurements."""
 
 from dataclasses import dataclass
-from enum import Enum
+from ..shared.phases import Phase
 from time import monotonic
 from threading import Lock
 
@@ -16,7 +16,7 @@ class SimulationClock:
         self._speed = time_scale
 
     def _advance(self, now):
-        # A different thread may have already supplied a newer timestamp.
+        # Monotonic mission time
         if now > self._last_real_time:
             self._mission_time_s += (now - self._last_real_time) * self._speed
             self._last_real_time = now
@@ -35,13 +35,6 @@ class SimulationClock:
         with self._lock:
             self._advance(monotonic())
             self._speed = scale
-
-class Phase(Enum):
-    INITIALIZING = 'initializing'
-    ENTRY = 'entry'
-    TD = 'terminal descent'
-    LANDING = 'landing'
-    LANDED = 'landed'
 
 @dataclass
 class MissionState:

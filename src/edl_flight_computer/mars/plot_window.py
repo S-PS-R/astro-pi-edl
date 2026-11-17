@@ -13,8 +13,7 @@ class PlotProcess:
         context = get_context('spawn')
         self.update_hz = context.Value('d', update_hz)
         self.samples = context.Queue(maxsize=256)
-        self.process = context.Process(target=run_plot_window, args=(self.samples, self.update_hz),
-                                       name='EDL plots', daemon=True)
+        self.process = context.Process(target=run_plot_window, args=(self.samples, self.update_hz), name='EDL plots', daemon=True)
         self.last_sample = None
         self.process.start()
 
@@ -24,10 +23,11 @@ class PlotProcess:
     def add_sample(self, sample):
         self.last_sample = sample
         message = ('sample', sample)
+
         try:
             self.samples.put_nowait(message)
         except Full:
-            # Drop an old plotting point rather than hold up flight calculations.
+            # Skip oldest queued point
             try:
                 self.samples.get_nowait()
             except Empty:
@@ -46,31 +46,26 @@ class PlotProcess:
         return True
 
     def close(self, path):
-        """Wait only during shutdown, giving the plotter time to save its PNG."""
+        # Final save and shutdown
         try:
             if self.process.is_alive():
                 self.samples.put(('close', str(path) if path else None,
                                   self.last_sample), timeout=10)
                 self.process.join(timeout=10)
+        except Full:
+            print('Plot queue full; final PNG could not be saved.', flush=True)
+        finally:
             if self.process.is_alive():
-                print('Plot process did not shut down in time; PNG saving may be incomplete.',
-                      flush=True)
+                print('Plot process did not close; stopping it.', flush=True)
                 self.process.terminate()
                 self.process.join(timeout=2)
-            elif self.process.exitcode:
-                print(f'Plot process exited with code {self.process.exitcode}.', flush=True)
-        except Full:
-            print('Plot process stopped accepting data; PNG could not be saved.', flush=True)
-            self.process.terminate()
-            self.process.join(timeout=2)
-        finally:
             self.samples.cancel_join_thread()
             self.samples.close()
 
 
 class FlightPlotWindow:
     def __init__(self, samples, update_hz):
-        # Import GUI dependencies only in the child process.
+        # Plot process GUI
         import tkinter as tk
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -83,13 +78,14 @@ class FlightPlotWindow:
         self.refresh_ms = round(1000 / update_hz.value)
         self.root = tk.Tk()
         self.root.title('Live EDL Flight Plots')
-        # The mission window owns shutdown for all displays.
+
+        # Shared window lifecycle
         self.root.protocol('WM_DELETE_WINDOW', lambda: None)
         self.figure = Figure(figsize=(10, 8), dpi=100)
-        self.figure.subplots_adjust(left=0.10, right=0.97, bottom=0.09,
-                                    top=0.94, wspace=0.32, hspace=0.40)
+        self.figure.subplots_adjust(left=0.10, right=0.97, bottom=0.09, top=0.94, wspace=0.32, hspace=0.40)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.root)
         self.canvas.get_tk_widget().pack(fill='both', expand=True)
+        
         update_plot(self.figure)
         for ax in self.figure.axes:
             ax.lines[0].set_animated(True)
@@ -137,7 +133,7 @@ class FlightPlotWindow:
             try:
                 message = self.samples.get_nowait()
             except Empty:
-                # An empty queue just means the plot has caught up.
+                # Queue drained
                 break
             if message[0] == 'sample':
                 points.append(message[1])
@@ -145,7 +141,7 @@ class FlightPlotWindow:
                 action, path, last_sample = message
                 if last_sample is not None and (not points or points[-1] != last_sample):
                     points.append(last_sample)
-                # Save only after consuming all earlier samples in FIFO order.
+                # Final queued sample
                 break
         limits = [(ax.get_xlim(), ax.get_ylim()) for ax in self.figure.axes]
         if points:
@@ -204,14 +200,13 @@ def update_plot(figure, samples=()):
                           for row in samples])
         x_data = np.concatenate((x, new_x))
         y_data = np.concatenate((y, [row[0] for row in samples]))
-        # Thin older history rather than allowing rendering cost to grow forever.
+        # Limit plot history
         if len(x_data) > max_points:
             indices = np.linspace(0, len(x_data) - 1, max_points // 2, dtype=int)
             x_data, y_data = x_data[indices], y_data[indices]
         line.set_data(x_data, y_data)
 
-        # Keep axes steady until a new value exceeds the current view. This
-        # allows the GUI to redraw only the curves between axis changes.
+        # Expand axes as needed
         finite = new_x[np.isfinite(new_x)]
         left, right = ax.get_xlim()
         if len(finite) and (not len(x) or finite.min() < left or finite.max() > right):

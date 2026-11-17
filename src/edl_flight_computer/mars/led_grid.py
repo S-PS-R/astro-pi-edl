@@ -5,6 +5,9 @@ from time import monotonic
 
 
 class TrajectoryLEDGrid:
+    # Grid axes: time left to right; altitude top to bottom
+    # Shared peak cells: cycling event colors
+    # Bottom-right: flashing green countdown; solid green landed
     COLOURS = {
         'peak_decel': (255, 0, 0), #red
         'peak_heating': (255, 165, 0), #orange
@@ -39,8 +42,7 @@ class TrajectoryLEDGrid:
             self.events.append((name, time_s, altitude_m))
 
     def _expand(self, time_s, altitude_m):
-        # This is a display range, not a forecast of landing time. Re-bin the
-        # recorded history if the trajectory exceeds the current bounds.
+        # Expand plot range
         while time_s > self.time_span_s:
             self.time_span_s *= 2
         self.altitude_max_m = max(self.altitude_max_m, altitude_m)
@@ -61,13 +63,6 @@ class TrajectoryLEDGrid:
         y = max(0, min(7, int(8 * (1 - altitude_m / altitude_max_m))))
         return x, y
 
-    def axis_label(self):
-        with self._lock:
-            return (f'LED grid: time 0–{self.time_span_s:g} s →; '
-                    f'altitude {self.altitude_max_m / 1000:g}–0 km ↓. '
-                    'Shared peak cells cycle colors; bottom-right flashing green = '
-                    'landing countdown, solid green = landed.')
-
     def render(self, wall_time_s=None):
         with self._lock:
             points = self.points.copy()
@@ -75,35 +70,44 @@ class TrajectoryLEDGrid:
             span, height = self.time_span_s, self.altitude_max_m
             landed = self.landed
             countdown_started_at = self._countdown_started_at
+
+        # Trajectory trail
         pixels = [(0, 0, 0)] * 64
         for time_s, altitude_m in points:
             x, y = self.cell(time_s, altitude_m, span, height)
             pixels[y*8 + x] = (0, 16, 24)  # Dim trajectory trail.
+
         if points and not landed:
             current_time_s, current_altitude_m = points[-1]
             x, y = self.cell(current_time_s, current_altitude_m, span, height)
             pixels[y*8 + x] = (180, 180, 180)
+            
+        # Peak markers
         buckets = {}
         for name, time_s, altitude_m in events:
             x, y = self.cell(time_s, altitude_m, span, height)
             names = buckets.setdefault(y*8 + x, [])
             if name not in names:
                 names.append(name)
+                
         now = monotonic() if wall_time_s is None else wall_time_s
+
         tick = int(now / 0.6)
         for index, names in buckets.items():
             colours = [self.COLOURS[name] for name in names]
             pixels[index] = colours[tick % len(colours)]
+
         if landed:
-            # Reserve the corner as an unambiguous completion indicator with green LED
+            # Landed indicator
             pixels[7*8 + 7] = (0, 255, 0)
         elif countdown_started_at is not None:
-            # Use wall time so pulses remain visible at accelerated playback speeds.
+            # Countdown pulse
             on = (now - countdown_started_at) % 1.0 < 0.5
             pixels[7*8 + 7] = (0, 255, 0) if on else (0, 0, 0)
         if pixels != self._previous:
             self.sense.set_pixels(pixels)
             self._previous = pixels
+
         return pixels
 
     def start(self):

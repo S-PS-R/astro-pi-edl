@@ -1,7 +1,7 @@
 """Public sensor access functions for the EDL flight computer."""
 
-from .hardware import get_hat, is_simulated
-from .sensors import SensorReader
+from .shared.hardware import get_hat, is_simulated
+from .shared.sensors import SensorReader
 
 __all__ = [
     "get_hat",

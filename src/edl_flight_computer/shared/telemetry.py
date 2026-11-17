@@ -2,7 +2,9 @@
 
 import csv
 from pathlib import Path
+from time import monotonic
 
+# default header used by mars, earth drop has its own header since most of these are not applicable to the live demo drop
 HEADER = (
     'time_s', 'wall_time_s', 'time_scale', 'phase', 'altitude_m', 'velocity_m_s', 'flight_path_angle_rad',
     'temperature_k', 'pressure_pa', 'density_kg_m3', 'gravity_m_s2',
@@ -19,23 +21,27 @@ HEADER = (
 
 
 class DropLog:
-    def __init__(self, path):
+    def __init__(self, path, *, fieldnames=HEADER, flush_interval_s=0.0):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # 'x' creates a new file and refuses to overwrite an existing recording.
+        # New recording
         self.stream = self.path.open('x', newline='', encoding='utf-8')
-        self.writer = csv.DictWriter(self.stream, fieldnames=HEADER)
+        self.writer = csv.DictWriter(self.stream, fieldnames=fieldnames)
+        self.flush_interval_s = flush_interval_s
+        self._last_flush = monotonic()
         self.writer.writeheader()
         self.stream.flush()
 
     def write(self, row):
         self.writer.writerow(row)
-        self.stream.flush()
+        if self.flush_interval_s <= 0 or monotonic() - self._last_flush >= self.flush_interval_s:
+            self.stream.flush()
+            self._last_flush = monotonic()
 
     def close(self):
         self.stream.close()
 
-    # These two methods also allow: with DropLog(path) as log:
+    # File cleanup
     def __enter__(self):
         return self
 
