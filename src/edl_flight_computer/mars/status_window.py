@@ -63,7 +63,7 @@ class MissionWindow:
                 controls.grid(row=row, column=2, sticky='w', padx=(12, 0))
                 self.speed_selection = tk.IntVar(master=self.root, value=int(time_scale))
                 self.speed_buttons = []
-                for scale in (1, 2, 5, 10):
+                for scale in (1, 2, 5, 10, 50):
                     button = ttk.Radiobutton(
                         controls, text=f'{scale}×', variable=self.speed_selection,
                         value=scale, command=lambda speed=scale: self.set_speed(speed))
@@ -73,7 +73,7 @@ class MissionWindow:
         row = len(labels) + 2
         # Peak readouts
         self.peak_labels = {
-            'peak_decel': 'peak acceleration (deceleration)',
+            'peak_acceleration': 'peak braking acceleration',
             'peak_heating': 'peak heating',
             'peak_velocity': 'peak velocity',
         }

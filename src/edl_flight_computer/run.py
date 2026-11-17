@@ -21,10 +21,13 @@ MARS_SETTINGS = {
 
 # Earth recording settings
 EARTH_SETTINGS = {
+    # Target rates: polling / CSV / laptop plots
+    'poll_hz': 250.0,
+    'csv_hz': 120.0,
+    'stream_hz': 20.0,
     'live_plotting': False,
     'laptop_ip': '',
     'stream_port': 8765,
-    'use_emulator': False,
     'ekf_use_pressure': True,  # Vented package only
     'detection': {
         'calibration_s': 2.0,

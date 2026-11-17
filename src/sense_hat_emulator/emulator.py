@@ -40,7 +40,7 @@ def measured_value(key, value):
 DEFAULTS = {
     'temperature': 20.0, 'temperature_humidity': 20.0, 'temperature_pressure': 20.0,
     'pressure': 1013.25, 'humidity': 0.0,
-    'accel_x': 0.0, 'accel_y': 0.0, 'accel_z': 1.0,
+    'accel_x': 0.0, 'accel_y': 0.0, 'accel_z': -1.0,
     'mag_x': 33.0, 'mag_y': 0.0, 'mag_z': 0.0,
     'gyro_x': 0.0, 'gyro_y': 0.0, 'gyro_z': 0.0,
 }

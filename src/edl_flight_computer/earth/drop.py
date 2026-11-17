@@ -5,9 +5,9 @@ from datetime import datetime
 from math import sqrt
 from pathlib import Path
 from statistics import fmean, pstdev
-from time import monotonic
+from time import monotonic, sleep
 
-from ..shared.hardware import get_hat
+from ..shared.hardware import get_hat, is_simulated
 from ..shared.notify import LandingNotifier
 from ..shared.phases import Phase
 from ..shared.sensors import SENSOR_CHANNELS, SensorReader
@@ -19,14 +19,10 @@ from .live_stream import PlotSender
 GROUPS = ('imu', 'mag', 'pressure', 'humidity')
 EKF_VALUES = ('ekf_displacement_m', 'ekf_vertical_velocity_m_s', 'ekf_accel_bias_m_s2', 'ekf_displacement_std_m', 'ekf_velocity_std_m_s')
 HEADER = (
-    'sequence', 'time_s', 'iteration_dt_s', 'flight_elapsed_s', 'phase', 'events',
+    'time_s', 'phase',
+    *EKF_VALUES,
+    'accel_magnitude_g', 'gyro_magnitude_rad_s',
     *SENSOR_CHANNELS,
-    *(group + '_sample_s' for group in GROUPS),
-    *(group + '_status' for group in GROUPS),
-    *(group + '_fresh' for group in GROUPS),
-    'accel_magnitude_g', 'gyro_magnitude_rad_s', 'settling_duration_s',
-    'imu_valid', 'release_detected', 'settling', 'settling_started_s', 'landing_confirmed_s',
-    *EKF_VALUES, 'ekf_updated', 'ekf_imu_gap', 'ekf_pressure_updated',
 )
 
 
@@ -174,14 +170,28 @@ def make_row(sequence, elapsed, dt, reader, detector, estimator, events):
 
 # main run code
 def run_live_drop(sense, output_path, notifier=None, stream_host=None,
-                   stream_port=8765, settings=None, stop_requested=None, ekf_use_pressure=True):
+                   stream_port=8765, settings=None, stop_requested=None, ekf_use_pressure=True,
+                  poll_hz=250.0, csv_hz=120.0, stream_hz=20.0):
+    # Target rates
+    if min(poll_hz, csv_hz, stream_hz) <= 0:
+        raise ValueError('Recording rates must be positive')
+    poll_period = 1.0 / poll_hz
+    csv_period = 1.0 / csv_hz
+
     # Recording setup
     reader = SensorReader(sense)
     detector = DropDetector(settings)
-    sender = PlotSender(stream_host, stream_port) if stream_host is not None else None
+    sender = PlotSender(stream_host, stream_port, rate_hz=stream_hz) if stream_host is not None else None
     estimator = None
     last_estimate_at = None
-    started_at = previous_at = monotonic()
+    started_at = monotonic()
+    previous_poll_at = previous_csv_at = started_at
+    next_poll_at = next_csv_at = started_at
+    poll_dt = 0.0
+    valid = False
+    pending_events = []
+    fresh_groups = set()
+    estimate_flags = dict(ekf_updated=False, ekf_imu_gap=False, ekf_pressure_updated=False)
     sequence = 0
     previous_led = None
     sense.clear()
@@ -190,44 +200,57 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
     try:
         with DropLog(output_path, fieldnames=HEADER, flush_interval_s=0.25) as log:
             while True:
-                # Sensor acquisition
                 now = monotonic()
                 elapsed = now - started_at
-                readings = reader.read(elapsed, recover_errors=True)
-                imu_time = reader.sample_times_s.get('imu')
-                valid = (imu_time is not None and 'imu' not in reader.errors
-                         and elapsed - imu_time <= detector.settings['max_imu_gap_s'])
-                fresh = 'imu' in reader.updated_groups
-                events = detector.update(elapsed, readings, fresh, valid)
 
-                # EKF initialization
-                updated = gap = pressure_updated = False
-                if 'ready' in events:
-                    estimator = EKF(detector.up_body, detector.gyro_bias,
-                                               detector.baseline_g, use_pressure=ekf_use_pressure)
-                    last_estimate_at = elapsed
-                    updated = True
+                # Sensor polling and estimation: 250 Hz
+                if now >= next_poll_at:
+                    readings = reader.read(elapsed, recover_errors=True)
+                    imu_time = reader.sample_times_s.get('imu')
+                    valid = (imu_time is not None and 'imu' not in reader.errors
+                             and elapsed - imu_time <= detector.settings['max_imu_gap_s'])
+                    fresh = 'imu' in reader.updated_groups
+                    events = detector.update(elapsed, readings, fresh, valid)
 
-                # Fresh measurement updates
-                if estimator is not None:
-                    if valid and fresh:
-                        dt = elapsed - last_estimate_at
-                        gap = dt > detector.settings['max_imu_gap_s']
-                        accel = [readings['accel_' + axis] for axis in 'xyz']
-                        gyro = [readings['gyro_' + axis] for axis in 'xyz']
-                        estimator.predict(dt, accel, gyro, imu_gap=gap)
-                        if detector.phase == Phase.WAITING_FOR_RELEASE and detector.release_candidate_at is None:
-                            estimator.constrain_waiting(accel)
+                    # EKF initialization
+                    updated = gap = pressure_updated = False
+                    if 'ready' in events:
+                        estimator = EKF(detector.up_body, detector.gyro_bias,
+                                                   detector.baseline_g, use_pressure=ekf_use_pressure)
                         last_estimate_at = elapsed
                         updated = True
-                    if 'pressure' in reader.updated_groups:
-                        estimator.update_pressure(readings['pressure'] * 100.0,
-                                                  waiting=detector.release_at is None)
-                        pressure_updated = estimator.pressure_updated
-                        updated = updated or pressure_updated
-                    if 'landing' in events:
-                        estimator.confirm_landed()
-                        updated = True
+
+                    # Fresh measurement updates
+                    if estimator is not None:
+                        if valid and fresh:
+                            dt = elapsed - last_estimate_at
+                            gap = dt > detector.settings['max_imu_gap_s']
+                            accel = [readings['accel_' + axis] for axis in 'xyz']
+                            gyro = [readings['gyro_' + axis] for axis in 'xyz']
+                            estimator.predict(dt, accel, gyro, imu_gap=gap)
+                            if detector.phase == Phase.WAITING_FOR_RELEASE and detector.release_candidate_at is None:
+                                estimator.constrain_waiting(accel)
+                            last_estimate_at = elapsed
+                            updated = True
+                        if 'pressure' in reader.updated_groups:
+                            estimator.update_pressure(readings['pressure'] * 100.0,
+                                                      waiting=detector.release_at is None)
+                            pressure_updated = estimator.pressure_updated
+                            updated = updated or pressure_updated
+                        if 'landing' in events:
+                            estimator.confirm_landed()
+                            updated = True
+
+                    pending_events.extend(events)
+                    fresh_groups.update(reader.updated_groups)
+                    estimate_flags['ekf_updated'] |= updated
+                    estimate_flags['ekf_imu_gap'] |= gap
+                    estimate_flags['ekf_pressure_updated'] |= pressure_updated
+                    poll_dt = now - previous_poll_at
+                    previous_poll_at = now
+                    next_poll_at += poll_period
+                    if next_poll_at <= now:
+                        next_poll_at = now + poll_period
 
                 # Green landing indicator
                 if detector.release_at is not None:
@@ -236,19 +259,45 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
                         sense.set_pixel(7, 7, 0, 255 if led_on else 0, 0)
                         previous_led = led_on
 
-                # CSV and laptop snapshot
+                # Scheduled output and final event
                 stopped = stop_requested is not None and stop_requested()
+                finished = detector.phase == Phase.LANDED or stopped
+                log_due = now >= next_csv_at or finished
+                stream_due = sender is not None and (now >= sender.next_send_at or finished)
                 if stopped and detector.phase != Phase.LANDED:
-                    events.append('stopped')
-                row = make_row(sequence, elapsed, now-previous_at, reader, detector, estimator, events)
-                row.update(imu_valid=valid, ekf_updated=updated, ekf_imu_gap=gap, ekf_pressure_updated=pressure_updated)
-                log.write(row)
-                if sender is not None:
-                    sender.publish(row, now, force=detector.phase == Phase.LANDED or stopped)
-                previous_at = now
-                sequence += 1
-                if detector.phase == Phase.LANDED or stopped:
+                    pending_events.append('stopped')
+
+                if log_due or stream_due:
+                    row = make_row(sequence, elapsed, now-previous_csv_at, reader,
+                                   detector, estimator, pending_events)
+                    row.update(imu_valid=valid, poll_dt_s=poll_dt, **estimate_flags)
+                    for group in GROUPS:
+                        row[group + '_fresh'] = group in fresh_groups
+                    if log_due:
+                        # CSV rows: 120 Hz
+                        log.write({name: row[name] for name in HEADER})
+                        previous_csv_at = now
+                        sequence += 1
+                        pending_events.clear()
+                        fresh_groups.clear()
+                        estimate_flags = dict(ekf_updated=False, ekf_imu_gap=False,
+                                              ekf_pressure_updated=False)
+                        next_csv_at += csv_period
+                        if next_csv_at <= now:
+                            next_csv_at = now + csv_period
+                    if stream_due:
+                        # Laptop snapshots: 20 Hz
+                        sender.publish(row, now, force=finished)
+                if finished:
                     break
+
+                # Sleep until the next deadline
+                next_update = min(next_poll_at, next_csv_at)
+                if sender is not None:
+                    next_update = min(next_update, sender.next_send_at)
+                remaining = next_update - monotonic()
+                if remaining > 0:
+                    sleep(remaining)
     except KeyboardInterrupt:
         print('Live drop recording stopped.', flush=True)
     finally:
@@ -271,6 +320,56 @@ def run_live_drop(sense, output_path, notifier=None, stream_host=None,
     return detector
 
 
+def run_with_emulator(sense, output_path, **options):
+    # Desktop emulator window
+    import tkinter as tk
+    from threading import Event, Thread
+    from sense_hat_emulator.gui import EmulatorGUI
+
+    root = tk.Tk()
+    emulator = EmulatorGUI(root, sense)
+    stop = Event()
+    finished = Event()
+    errors = []
+
+    # Recording worker
+    def record():
+        try:
+            run_live_drop(sense, output_path, stop_requested=stop.is_set, **options)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    def close():
+        stop.set()
+        root.quit()
+
+    def check_recording():
+        if errors:
+            root.quit()
+        elif finished.is_set():
+            root.title('Sense HAT Emulator - recording finished')
+        else:
+            root.after(50, check_recording)
+
+    # Window lifecycle
+    root.protocol('WM_DELETE_WINDOW', close)
+    worker = Thread(target=record, name='Earth recording')
+    worker.start()
+    root.after(50, check_recording)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        stop.set()
+    finally:
+        stop.set()
+        worker.join()
+        root.destroy()
+    if errors:
+        raise errors[0]
+
+
 def main(settings=None):
     if settings is None:
         from ..run import EARTH_SETTINGS
@@ -279,13 +378,22 @@ def main(settings=None):
     # Hardware and output
     output_path = Path(__file__).resolve().parents[3] / 'logs' / ('drop_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.csv')
 
-    sense = get_hat(force_emulator=settings['use_emulator'],
-                    require_hardware=not settings['use_emulator'])
+    sense = get_hat()
 
-    run_live_drop(sense, output_path, notifier=LandingNotifier(),
-                   stream_host=settings['laptop_ip'] if settings['live_plotting'] else None,
-                   stream_port=settings['stream_port'], settings=settings['detection'],
-                   ekf_use_pressure=settings['ekf_use_pressure'])
+    options = {
+        'notifier': LandingNotifier(),
+        'stream_host': settings['laptop_ip'] if settings['live_plotting'] else None,
+        'stream_port': settings['stream_port'],
+        'settings': settings['detection'],
+        'ekf_use_pressure': settings['ekf_use_pressure'],
+        'poll_hz': settings['poll_hz'],
+        'csv_hz': settings['csv_hz'],
+        'stream_hz': settings['stream_hz'],
+    }
+    if is_simulated():
+        run_with_emulator(sense, output_path, **options)
+    else:
+        run_live_drop(sense, output_path, **options)
     return 0
 
 

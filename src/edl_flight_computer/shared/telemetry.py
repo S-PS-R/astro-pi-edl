@@ -3,20 +3,17 @@
 import csv
 from pathlib import Path
 from time import monotonic
+from .sensors import SENSOR_CHANNELS
 
-# default header used by mars, earth drop has its own header since most of these are not applicable to the live demo drop
+# Mars CSV: time, phase, calculated values, sensor values
 HEADER = (
-    'time_s', 'wall_time_s', 'time_scale', 'phase', 'altitude_m', 'velocity_m_s', 'flight_path_angle_rad',
+    'time_s', 'phase',
+    'altitude_m', 'velocity_m_s', 'flight_path_angle_rad',
     'temperature_k', 'pressure_pa', 'density_kg_m3', 'gravity_m_s2',
-    'dynamic_pressure_pa', 'drag_n', 'lift_n', 'lift_vertical_n', 'bank_angle_deg',
-    'vertical_velocity_m_s', 'events',
-    'acceleration_m_s2', 'deceleration_m_s2', 'g_load', 'heating_kw_m2',
-    'accel_x', 'accel_y', 'accel_z',
-    'gyro_x', 'gyro_y', 'gyro_z',
-    'mag_x', 'mag_y', 'mag_z',
-    'temperature_humidity', 'temperature_pressure',
-    'pressure', 'humidity',
-    'imu_sample_s', 'mag_sample_s', 'pressure_sample_s', 'humidity_sample_s',
+    'dynamic_pressure_pa', 'bank_angle_deg',
+    'vertical_velocity_m_s',
+    'acceleration_m_s2', 'g_load', 'heating_kw_m2',
+    *SENSOR_CHANNELS,
 )
 
 

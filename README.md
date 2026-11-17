@@ -32,7 +32,8 @@ python -m edl_flight_computer.run mars
 
 You can also launch either mission directly with
 `python -m edl_flight_computer.earth.drop` or
-`python -m edl_flight_computer.mars.sim`. Earth runs headless; Mars opens its
+`python -m edl_flight_computer.mars.sim`. Earth runs headless on real hardware
+and opens sensor controls when using the emulator. Mars opens its
 mission, plot, and optional emulator windows. Use **Stop and close** in the Mars
 mission window to save and close the group.
 
@@ -88,7 +89,7 @@ $env:EDL_EMAIL_TO = 'you@gmail.com'              # optional, comma separated
 On the Pi use `export NAME=value` instead. Without these variables, the run
 works normally and skips the email.
 
-`peak_tracker` remembers the highest heating, deceleration, and speed seen so
+`peak_tracker` remembers the highest heating, strongest braking acceleration, and speed seen so
 far. It reports a peak once the signal stays 1% below that maximum for one
 simulated second. It also keeps the time and altitude where the maximum occurred.
 
@@ -102,8 +103,9 @@ these same defaults:
 | Mars simulation | `MARS_SETTINGS`: entry conditions, vehicle parameters, update rate, playback speed |
 | Live Earth drop | `EARTH_SETTINGS`: detector thresholds, pressure corrections, hardware and laptop streaming |
 
-Earth requires a real Sense HAT unless `EARTH_SETTINGS['use_emulator'] = True` is explicitly
-selected for testing. It opens no windows. A vertical EKF estimates height and
+Earth uses the connected Sense HAT or automatically falls back to the emulator.
+Real hardware opens no windows. Emulator fallback opens its sensor controls and
+LED display using the same board instance as the recorder. A vertical EKF estimates displacement and
 velocity from sensors; the configured Earth flight trajectory is not run. See
 the recording and laptop plotting instructions below.
 
@@ -125,21 +127,31 @@ than 0.02 simulated seconds between state publications. `time_scale` defaults
 to 10 for Mars: ten simulated seconds pass per real second, so the current
 623-second entry takes about 63 real seconds. Set it to 1 for real time; the
 Earth recorder uses real elapsed time and is independent of these playback settings.
-Select **1x**, **2x**, **5x**, or **10x** beside mission time during a run.
-State, mission-display, and plot refresh rates change to 3, 6, 15, or 30 Hz
+Select **1x**, **2x**, **5x**, **10x**, or **50x** beside mission time during a run.
+The default remains **10x**. State, mission-display, and plot refresh rates target
+3, 6, 15, 30, or 150 Hz
 respectively. Mission time accumulates
 continuously across speed changes instead of being rescaled retroactively.
-CSV `time_s` is simulated mission time, while `wall_time_s` and sensor sample
-timestamps use real elapsed seconds. Speed is along the flight path; altitude
+Mars CSV columns are ordered as `time_s`, phase, calculated values, then raw
+sensor values. `time_s` is simulated mission time. Playback speed and sensor
+poll timestamps stay internal rather than adding CSV columns. Speed is along the flight path; altitude
 changes at `V * sin(FPA)`.
 
-Peak heating, speed deceleration, and velocity are detected during the run; there is no
+`acceleration_m_s2` is the original speed derivative, `dV/dt`: negative when
+slowing and positive when speeding up. It is along the flight path, rather than
+vertical. `g_load` is that signed acceleration divided by local gravity.
+Downward motion is represented by negative `vertical_velocity_m_s`; accelerating
+downward in free fall increases speed, so `dV/dt` is positive in that case.
+There is one acceleration column; drag/lift forces remain internal to the flight
+equations and are not separate CSV columns.
+
+Peak heating, strongest braking acceleration, and velocity are detected during the run; there is no
 analytical glide forecast. A peak is confirmed after the signal stays at least
 1% below its observed maximum for one simulated second for all three channels.
 The 8x8 LED display maps
 mission time left to right and altitude top to bottom. A dim cyan trail shows
 the trajectory; white marks the current position. Persistent peak markers are
-red for acceleration (deceleration magnitude), orange for heating, and purple
+red for peak braking acceleration (stored negative), orange for heating, and purple
 for velocity, located at the maximum's actual time and altitude. Shared cells
 cycle through event colors every 0.6 real seconds instead of overwriting them.
 The purple velocity marker appears only after confirmation, at the maximum's
@@ -153,8 +165,9 @@ The white position marker turns off at ground contact.
 Stopping or cancelling before ground contact does not turn it green.
 LEDs clear when the application closes or a new
 run starts. The
-terminal reports the maximum's time and the later confirmation time; the CSV
-records the event. A later, higher maximum rearms detection. A maximum at the
+terminal reports the maximum's time and the later confirmation time. The CSV
+records the calculated values and phase; peak events remain in the terminal and
+LED display. A later, higher maximum rearms detection. A maximum at the
 end of a run remains unconfirmed if no sustained decrease has been observed.
 
 Mars keeps the configured entry-interface altitude, speed, and FPA. The
@@ -183,17 +196,40 @@ starts on confirmed release. Renewed movement resets the settling timer; being
 stationary before release never ends the run. Ctrl+C closes the CSV without
 reporting landing.
 
-The loop has no artificial rate cap or fixed sleep. Sensor polling retains the
-configured nominal rates (IMU 119 Hz, pressure 25 Hz, magnetometer 20 Hz, humidity
-12.5 Hz). Every processing iteration becomes a CSV row, including iterations
-with repeated readings. `*_sample_s`, `*_fresh`, and `*_status` identify successful
-polls, cached values, and failures; poll timestamps are not chip timestamps.
+When the emulator is selected, its window opens automatically. Recording runs
+in a worker thread so sliders, CSV replay, and the LED display stay responsive.
+Closing the window stops recording and closes the CSV. After a confirmed landing,
+the window stays open to show the final green LED until you close it. Mars also
+opens the emulator controls whenever it uses simulated hardware.
 
-Files are created as `logs/drop_YYYYMMDD_HHMMSS_microseconds.csv`. Columns include
-all raw sensors, row sequence, recording and flight times, loop duration, phase,
-events, sensor-group timestamps/status, acceleration and corrected gyro
-magnitudes, settling/confirmation state, and separately labeled EKF estimates
-and uncertainty. No simulated trajectory or heating is presented as an Earth
+Earth uses the same target rates on the Pi and desktop emulator. Configure them
+in `EARTH_SETTINGS` in `run.py`:
+
+| Setting | Target rate | Purpose |
+| --- | --- | --- |
+| `poll_hz` | 250 Hz | Check sensors and update detection/EKF |
+| `csv_hz` | 120 Hz | Write CSV snapshots |
+| `stream_hz` | 20 Hz | Send optional laptop plotting snapshots |
+
+The loop sleeps between monotonic deadlines. Faster hardware does not produce
+unlimited duplicate CSV rows. Missed deadlines are skipped; no catch-up samples
+are invented. Rates are targets, subject to Pi processing, storage, and Linux
+scheduling. The final landing/stop row is written immediately outside the regular
+CSV schedule when necessary.
+
+Sensor groups retain their configured nominal rates (IMU 119 Hz, pressure 25 Hz,
+magnetometer 20 Hz, humidity 12.5 Hz). Slower readings repeat between updates.
+EKF updates use actual elapsed time between fresh IMU polls. Poll timestamps,
+freshness/status flags, timing diagnostics, and the release timer remain internal
+and in laptop snapshots; they are omitted from the normal CSV.
+
+Files are created as `logs/drop_YYYYMMDD_HHMMSS_microseconds.csv`. Columns are ordered
+as recording time (`time_s`), phase, calculated values, then raw sensor readings.
+Calculated values are EKF displacement, vertical velocity, acceleration bias,
+displacement/velocity uncertainty, acceleration magnitude, and corrected gyro
+magnitude. Raw values include all accelerometer, gyro, magnetometer, pressure,
+temperature, and humidity channels. CSV row intervals can be calculated from
+consecutive `time_s` values. No simulated trajectory or heating is presented as an Earth
 measurement. Writes are buffered and flushed
 every 0.25 seconds and when the file closes. Sampling throughput depends on the Pi
 and storage; row frequency does not increase the hardware sample rate.
@@ -203,8 +239,8 @@ and storage; row frequency does not increase the hardware sample rate.
 0.10 g of the calibrated magnitude, per-axis acceleration standard deviation
 below 0.03 g over 0.25 seconds, and bias-corrected gyro magnitude below 0.10 rad/s.
 Settling must hold for five seconds; failed reads or IMU gaps above 0.1 seconds
-reset that evidence. The flight timer includes the confirmation interval, whose
-start and end are also logged separately.
+reset that evidence. The internal flight timer includes the confirmation interval;
+phase changes in the CSV mark release and confirmed landing.
 
 Validate these thresholds with the packaged Pi. Five seconds of sufficiently
 smooth parachute descent can resemble rest to the IMU. Pressure is recorded but
@@ -231,8 +267,8 @@ as IMU errors accumulate. Sensor gaps coast with increased uncertainty rather
 than integrating stale accelerations.
 
 `ekf_displacement_m`, `ekf_vertical_velocity_m_s`, `ekf_accel_bias_m_s2`, displacement and
-velocity standard deviations, and update/gap flags are included in every CSV
-row and laptop snapshot. Estimates remain blank until calibration completes
+velocity standard deviations are included in every CSV row and laptop snapshot.
+Update/gap flags remain in laptop snapshots. Estimates remain blank until calibration completes
 and hold between new sensor observations. The laptop's six panels still display
 raw sensors. EKF estimates never stop recording or confirm landing; the
 five-second IMU detector does that independently and then supplies a zero-speed
@@ -259,4 +295,5 @@ and humidity, plus phase and flight time. Plot snapshots are sent at 20 Hz; the
 Pi's full-rate CSV remains independent. The receiver retains ten minutes of
 history and marks gaps after a disconnection. Packet loss or closing the laptop
 does not stop Pi recording. All rendering happens on the laptop; the Pi creates
-no windows, PNGs, or plotting processes.
+no mission plots or PNGs. Real-hardware Earth runs remain headless; emulator
+fallback opens only the sensor-control window locally.

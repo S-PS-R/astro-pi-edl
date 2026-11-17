@@ -9,7 +9,7 @@ class TrajectoryLEDGrid:
     # Shared peak cells: cycling event colors
     # Bottom-right: flashing green countdown; solid green landed
     COLOURS = {
-        'peak_decel': (255, 0, 0), #red
+        'peak_acceleration': (255, 0, 0), #red
         'peak_heating': (255, 165, 0), #orange
         'peak_velocity': (128, 0, 128), #purple
     }

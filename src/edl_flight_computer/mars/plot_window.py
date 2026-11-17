@@ -178,7 +178,7 @@ def update_plot(figure, samples=()):
             ('Altitude vs Density', 'Density (kg/m³)'),
             ('Altitude vs Velocity', 'Velocity (m/s)'),
             ('Altitude vs Heating', 'Convective heat flux (kW/m²)'),
-            ('Altitude vs Acceleration', 'Acceleration (m/s²)'),
+            ('Altitude vs Acceleration', 'Speed acceleration (m/s²)'),
         )
         for ax, (title, xlabel) in zip(axes, labels):
             ax.plot([], [], linewidth=1.5)

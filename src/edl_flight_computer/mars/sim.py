@@ -15,7 +15,7 @@ from ..shared.telemetry import DropLog
 
 
 def run_mission(sense, state, vehicle_params, window, led_grid, output_path, notifier):
-    """Read sensors, advance the flight, record events, and publish each state."""
+    """Read sensors, advance the flight, log data, and publish each state."""
     sensor_reader = SensorReader(sense)
     peak_tracker = PeakTracker()
     clock = window.sim_clock
@@ -76,17 +76,14 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
 
             # Peak events
             new_peaks = peak_tracker.update_peaks(mission_time_s, flight_values)
-            event_names = []
             led_grid.add_sample(mission_time_s, state.altitude_m)
             for name, peak in new_peaks:
                 led_grid.add_event(name, peak['time_s'], peak['altitude_m'])
-                event_names.append(name)
                 print(f"{name}: {peak['value']:.4f} {peak['units']} at "
                       f"{peak['time_s']:.2f} s (confirmed at {mission_time_s:.2f} s)", flush=True)
             if landed:
                 state.phase = Phase.LANDED
                 led_grid.mark_landed()
-                event_names.append('landing')
                 print(f'Ground contact at {mission_time_s:.2f} s', flush=True)
                 notifier.send(f"EDL landing: {state.planet['name'].upper()}",
                               landing_message(state.planet['name'], mission_time_s,
@@ -95,15 +92,10 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, not
             # CSV and display update
             log.write({
                 'time_s': mission_time_s,
-                'wall_time_s': real_elapsed_s,
-                'time_scale': playback_speed,
                 'phase': state.phase.value,
                 'flight_path_angle_rad': state.flight_path_angle_rad,
                 **flight_values,
                 **sensor_readings,
-                **{group + '_sample_s': sample_time
-                   for group, sample_time in sensor_reader.sample_times_s.items()},
-                'events': ';'.join(event_names),
             })
             window.publish(state, flight_values, peak_tracker.get_peaks())
             if landed:

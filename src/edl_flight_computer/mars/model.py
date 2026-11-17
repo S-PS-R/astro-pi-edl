@@ -68,14 +68,10 @@ def calculate_state(X, planet, vehicle_params):
         'density_kg_m3': rho,
         'gravity_m_s2': g,
         'dynamic_pressure_pa': dynamic_pressure,
-        'drag_n': D,
-        'lift_n': L,
-        'lift_vertical_n': L * bank_cos,
         'bank_angle_deg': degrees(acos(bank_cos)),
         'vertical_velocity_m_s': h_dot,
         'acceleration_m_s2': V_dot,
-        'deceleration_m_s2': max(0.0, -V_dot),
-        'g_load': sqrt(D**2 + L**2) / (m * planet['gravity']),
+        'g_load': V_dot / g,
         'heating_kw_m2': heating,
     }
     return np.array([h_dot, V_dot, gamma_dot]), values
@@ -109,7 +105,7 @@ def advance_state(X, dt, planet, vehicle_params, max_step=0.02):
 class PeakTracker:
     """Remember maxima, then confirm them after a sustained 1% decrease."""
     CHANNELS = {
-        'peak_decel': ('deceleration_m_s2', 'm/s^2'),
+        'peak_acceleration': ('acceleration_m_s2', 'm/s^2'),
         'peak_heating': ('heating_kw_m2', 'kW/m^2'),
         'peak_velocity': ('velocity_m_s', 'm/s'),
     }
@@ -124,18 +120,22 @@ class PeakTracker:
         events = []
         for name, (key, units) in self.CHANNELS.items():
             value = flight_values[key]
+            # Negative acceleration is braking
+            strength = -value if name == 'peak_acceleration' else value
             # Initial sample
-            if value == 0 and name not in self.peaks:
+            if strength <= 0 and name not in self.peaks:
                 continue
             peak = self.peaks.get(name)
-            if peak is None or value > peak['value']:
+            peak_strength = 0.0 if peak is None else (
+                -peak['value'] if name == 'peak_acceleration' else peak['value'])
+            if peak is None or strength > peak_strength:
                 # New peak
                 self.peaks[name] = dict(value=value, units=units, time_s=mission_time_s,
                                         altitude_m=flight_values['altitude_m'],
                                         confirmed=False)
                 self.decline_started_at.pop(name, None)
             elif not peak['confirmed']:
-                if value <= peak['value'] * (1 - self.drop_fraction):
+                if strength <= peak_strength * (1 - self.drop_fraction):
                     decline_started_s = self.decline_started_at.setdefault(name, mission_time_s)
                     if mission_time_s - decline_started_s >= self.confirmation_s:
                         peak['confirmed'] = True

@@ -2,7 +2,6 @@
 
 from enum import Enum
 
-
 class Phase(Enum):
     INITIALIZING = 'initializing'
     WAITING_FOR_RELEASE = 'waiting for release'
