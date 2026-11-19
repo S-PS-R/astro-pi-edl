@@ -5,6 +5,7 @@ logging, and event display live in ground_station.py.
 """
 
 from collections import deque
+from .appearance import DARK_PLOT_STYLE, TRACE_COLORS
 
 # Panels per mission: (title, telemetry keys)
 PANELS = {
@@ -63,9 +64,11 @@ class SnapshotBuffer:
 
 class TelemetryPlot:
     def __init__(self, port):
+        from matplotlib import rc_context
         import matplotlib.pyplot as plt
-        self.figure = plt.figure(figsize=(12, 8), layout='constrained')
-        self.figure.suptitle(f'Waiting for telemetry on UDP port {port}')
+        with rc_context(DARK_PLOT_STYLE):
+            self.figure = plt.figure(figsize=(12, 8), layout='constrained')
+            self.figure.suptitle(f'Waiting for telemetry on UDP port {port}')
         self.run = None
         self.mission = None
         self.history = SnapshotBuffer()
@@ -73,19 +76,23 @@ class TelemetryPlot:
         self.dirty = False
 
     def _build(self, mission):
+        from matplotlib import rc_context
+
         # Mission-specific panels
         self.figure.clear()
         self.axes = []
         panels = PANELS.get(mission, ())
-        for index, (title, channels) in enumerate(panels):
-            axis = self.figure.add_subplot(3, 2, index + 1)
-            axis.set_title(title)
-            axis.set_xlabel(TIME_LABELS.get(mission, 'Time (s)'))
-            axis.grid(alpha=0.25)
-            traces = [(name, axis.plot([], [], label=name)[0]) for name in channels]
-            if len(channels) > 1:
-                axis.legend(loc='upper left', fontsize='small')
-            self.axes.append((axis, traces))
+        with rc_context(DARK_PLOT_STYLE):
+            for index, (title, channels) in enumerate(panels):
+                axis = self.figure.add_subplot(3, 2, index + 1)
+                axis.set_title(title)
+                axis.set_xlabel(TIME_LABELS.get(mission, 'Time (s)'))
+                axis.grid(alpha=0.5)
+                traces = [(name, axis.plot([], [], label=name, color=color)[0])
+                          for name, color in zip(channels, TRACE_COLORS)]
+                if len(channels) > 1:
+                    axis.legend(loc='upper left', fontsize='small')
+                self.axes.append((axis, traces))
         self.mission = mission
 
     def add(self, packet):
@@ -130,4 +137,5 @@ class TelemetryPlot:
             detail = 'waiting for release' if flight is None else f'flight {flight:.2f} s'
         else:
             detail = f'T+{time_s:.1f} s'
-        self.figure.suptitle(f'{self.mission.upper()} — {self.run} — {phase} — {detail}')
+        self.figure.suptitle(f'{self.mission.upper()} — {self.run} — {phase} — {detail}',
+                            color=DARK_PLOT_STYLE['text.color'])

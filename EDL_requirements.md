@@ -12,11 +12,12 @@
 Completed
 1. (NOT STARTED) Live demo pending
 2. (DONE)
-3. (NOT STARTED) Need to get from team
-4. (PARTIAL) Downlinked to ground station: entry interface, peak heating, peak deceleration, peak velocity, start of terminal descent (10 s to landing), landing. Not modeled: parachute deploy, separation
+3. (DONE for modeled Mars phases) Deployment uses the configured Mach, dynamic pressure, and altitude limits while descending. Terminal descent uses the configured equilibrium-speed and vertical-acceleration tolerances. Ground contact occurs at zero altitude.
+4. (PARTIAL) Mars downlinks entry interface, peak heating, entry peak deceleration, peak velocity, parachute deployment with opening acceleration, start of terminal descent, the separate 10-second landing warning, and landing. Separation remains to be modeled.
 5. (DONE)
 6. (DONE)
 7. (DONE) Range checks on temperature, humidity, pressure (both missions) and gyro motion (Mars); limits in run.py fault_limits; tune temperature limit on packaged board
 8. (DONE) fault / fault_cleared events in UDP telecom stream; active faults in every telemetry packet and ground station status line. Response is reporting only (no LED or flight action)
 9. (DONE)
 10. (AT RISK) Landing email replaced by UDP landing event to ground station laptop; may not count as text, email, or social media post
+    - maybe we can do both, where the email just sends the end data + plots?

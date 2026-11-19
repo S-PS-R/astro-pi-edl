@@ -4,12 +4,13 @@ from math import degrees
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
+from ..shared.appearance import apply_tk_dark_theme, save_window_image
 from .plot_window import PlotProcess
 from .state import SimulationClock
 
 
 def format_reading(value):
-    return f'{value:.3f}'
+    return '' if value is None else f'{value:.3f}'
 
 
 class MissionWindow:
@@ -19,22 +20,21 @@ class MissionWindow:
         update_hz = updates_per_sim_second * time_scale
         self.closed = False
         self.finished = False
-        self.observed_peaks = {}
-        self.peak_fields = {}
         self.latest = {}
         self.displayed = {}
-        self.displayed_peaks = None
         self.previous_status = None
         self.fields = {}
         self.emulator = None
         self.refresh_ms = round(1000 / update_hz)
         self.plot_path = Path(plot_path)
         self.plot_save_requested = False
+        self.window_images_saved = False
         # Main window
         self.root = tk.Tk()
+        apply_tk_dark_theme(self.root)
         self.root.title('EDL Mission - ' + planet_name.upper())
         self.root.geometry('+30+30')
-        self.root.minsize(440, 420)
+        self.root.minsize(440, 350)
         panel = ttk.Frame(self.root, padding=16)
         panel.pack(fill='both', expand=True)
         panel.columnconfigure(1, weight=1)
@@ -50,7 +50,7 @@ class MissionWindow:
             'altitude_m': 'Altitude / height (m)',
             'velocity_m_s': 'Speed (m/s)',
             'flight_path_angle_deg': 'Flight-path angle (deg)',
-            'bank_angle_deg': 'Commanded bank angle (deg)',
+            'bank_angle_deg': 'Bank angle (deg)',
             'heating_kw_m2': 'Convective heat flux (kW/m²)',
             'acceleration_m_s2': 'Speed acceleration (m/s²)',
         }
@@ -70,20 +70,8 @@ class MissionWindow:
                     button.pack(side='left', padx=3)
                     self.speed_buttons.append(button)
 
-        row = len(labels) + 2
-        # Peak readouts
-        self.peak_labels = {
-            'peak_acceleration': 'peak braking acceleration',
-            'peak_heating': 'peak heating',
-            'peak_velocity': 'peak velocity',
-        }
-        for name, label in self.peak_labels.items():
-            self.peak_fields[name] = tk.StringVar(master=self.root, value=f'Observed {label}: -')
-            ttk.Label(panel, textvariable=self.peak_fields[name]).grid(
-                row=row, column=0, columnspan=3, sticky='w', pady=3)
-            row += 1
         ttk.Button(panel, text='Stop and close', command=self.close).grid(
-            row=row, column=0, columnspan=3, sticky='w', pady=(12, 0))
+            row=len(labels) + 2, column=0, columnspan=3, sticky='w', pady=(12, 0))
         self.root.protocol('WM_DELETE_WINDOW', self.close)
         self.plotter = PlotProcess(update_hz=update_hz)
         self.timer = self.root.after(self.refresh_ms, self.refresh)
@@ -102,6 +90,7 @@ class MissionWindow:
     def open_emulator(self, sense):
         from sense_hat_emulator.gui import EmulatorGUI
         emulator_root = tk.Toplevel(self.root)
+        emulator_root.configure(background=self.root.cget('background'))
         # Shared window lifecycle
         emulator_root.protocol('WM_DELETE_WINDOW', lambda: None)
         self.root.update_idletasks()
@@ -109,12 +98,12 @@ class MissionWindow:
         emulator_root.geometry(f'+{x}+30')
         self.emulator = EmulatorGUI(emulator_root, sense)
 
-    def publish(self, state, values, observed_peaks):
+    def plot_deployment(self, before, after):
+        self.plotter.add_deployment(before, after)
+
+    def publish(self, state, values):
         # Latest display snapshot
-        self.observed_peaks = observed_peaks
-        self.plotter.add_sample((state.altitude_m, values['density_kg_m3'],
-                                 state.velocity_m_s, values['heating_kw_m2'],
-                                 values['acceleration_m_s2']))
+        self.plotter.add_sample(values)
         self.latest = {
             'phase': state.phase.value.upper(),
             'elapsed_s': format_reading(state.elapsed_s),
@@ -125,33 +114,40 @@ class MissionWindow:
                for name in ('acceleration_m_s2', 'bank_angle_deg', 'heating_kw_m2')},
         }
 
-    def refresh(self):
-        if self.closed:
-            return
+    def update_display(self):
         latest = self.latest
         for name, value in latest.items():
             if self.displayed.get(name) != value:
                 self.fields[name].set(value)
         self.displayed = latest
-        peaks = self.observed_peaks
-        if peaks != self.displayed_peaks:
-            for name, field in self.peak_fields.items():
-                peak = peaks.get(name)
-                if peak is not None:
-                    field.set(f"Observed {self.peak_labels[name]}: {peak['value']:.3f} {peak['units']} "
-                              f"at {peak['time_s']:.1f} s")
-            self.displayed_peaks = peaks.copy()
-        if self.finished:
+        if self.finished or self.closed:
             for button in self.speed_buttons:
                 button.configure(state='disabled')
-            self.save_plots()
-            status = 'Run finished - close this window to exit'
+            status = ('Run finished - close this window to exit'
+                      if latest.get('phase') == 'LANDED' else 'Run stopped')
         else:
             status = 'Running'
         if status != self.previous_status:
             self.status.set(status)
             self.previous_status = status
+
+    def refresh(self):
+        if self.closed:
+            return
+        self.update_display()
+        if self.finished:
+            self.save_plots()
+            self.save_final_windows()
         self.timer = self.root.after(self.refresh_ms, self.refresh)
+
+    def save_final_windows(self):
+        if self.window_images_saved:
+            return
+        self.window_images_saved = True
+        save_window_image(self.root, self.plot_path.with_name('final_mission_window.png'))
+        if self.emulator is not None:
+            self.emulator.refresh(schedule_next=False)
+            save_window_image(self.emulator.root, self.plot_path.with_name('final_emulator.png'))
 
     def close(self):
         if not self.closed:
@@ -168,6 +164,8 @@ class MissionWindow:
     def destroy(self):
         """Release Tk widgets after the worker stops and plotting is saved."""
         try:
+            self.update_display()
+            self.save_final_windows()
             self.plotter.close(self.plot_path)
         finally:
             self.root.destroy()

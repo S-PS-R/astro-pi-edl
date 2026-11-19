@@ -1,7 +1,6 @@
 """Headless Live drop recording and landing detection."""
 
 from collections import deque
-from datetime import datetime
 from math import sqrt
 from pathlib import Path
 from statistics import fmean, pstdev
@@ -12,7 +11,7 @@ from ..shared.faults import FaultMonitor, report as report_faults
 from ..shared.hardware import get_hat, is_simulated
 from ..shared.phases import Phase
 from ..shared.sensors import SENSOR_CHANNELS, SensorReader
-from ..shared.telemetry import DropLog
+from ..shared.telemetry import DropLog, new_run_csv
 from .ekf import EKF
 
 # Ground station event messages
@@ -345,12 +344,15 @@ def run_with_emulator(sense, output_path, **options):
     import tkinter as tk
     from threading import Event, Thread
     from sense_hat_emulator.gui import EmulatorGUI
+    from ..shared.appearance import save_window_image
 
     root = tk.Tk()
     emulator = EmulatorGUI(root, sense)
+    image_path = Path(output_path).with_name('final_emulator.png')
     stop = Event()
     finished = Event()
     errors = []
+    emulator_saved = False
 
     # Recording worker
     def record():
@@ -365,11 +367,20 @@ def run_with_emulator(sense, output_path, **options):
         stop.set()
         root.quit()
 
+    def save_emulator():
+        nonlocal emulator_saved
+        if emulator_saved:
+            return
+        emulator_saved = True
+        emulator.refresh(schedule_next=False)
+        save_window_image(root, image_path)
+
     def check_recording():
         if errors:
             root.quit()
         elif finished.is_set():
             root.title('Sense HAT Emulator - recording finished')
+            save_emulator()
         else:
             root.after(50, check_recording)
 
@@ -385,7 +396,10 @@ def run_with_emulator(sense, output_path, **options):
     finally:
         stop.set()
         worker.join()
-        root.destroy()
+        try:
+            save_emulator()
+        finally:
+            root.destroy()
     if errors:
         raise errors[0]
 
@@ -396,7 +410,7 @@ def main(settings=None):
         settings = EARTH_SETTINGS
 
     # Hardware and output
-    output_path = Path(__file__).resolve().parents[3] / 'logs' / ('drop_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.csv')
+    output_path = new_run_csv('drop_')
 
     sense = get_hat()
 

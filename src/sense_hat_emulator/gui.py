@@ -141,7 +141,7 @@ class EmulatorGUI:
     def change_noise(self):
         self.sense.noise = self.noise_enabled.get()
 
-    def refresh(self):
+    def refresh(self, *, schedule_next=True):
         """Read current values, update widgets, then schedule the next display refresh."""
         # Latest readings
         targets, pixels = self.sense._state.snapshot()
@@ -199,7 +199,8 @@ class EmulatorGUI:
             self.status.set(status)
             self.previous_status = status
 
-        self.timer = self.root.after(33, self.refresh)
+        if schedule_next:
+            self.timer = self.root.after(33, self.refresh)
 
     def on_destroy(self, event):
         if event.widget is self.root and self.timer is not None:

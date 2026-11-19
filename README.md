@@ -77,10 +77,10 @@ remain unchanged.
 
 ## Ground station downlink
 
-Both missions send UDP packets to a "ground station" laptop: periodic
-**telemetry** snapshots and critical **events**. Mars events are entry interface,
-confirmed peak velocity, heating, and deceleration, the ten-second terminal descent
-warning, landing (with a summary of the confirmed peaks), and stop. Earth events
+Both missions send periodic **telemetry** snapshots and critical **events** to a
+ground station laptop over UDP. Mars events are entry interface, confirmed peak
+velocity, heating, and deceleration, `parachute_deploy`, `terminal_descent`,
+`landing_warning`, landing (with a summary of the confirmed peaks), and stop. Earth events
 are recording start, calibration complete, release, confirmed landing (with
 flight time), and stop. Each event is also printed in the flight terminal.
 
@@ -146,7 +146,7 @@ these same defaults:
 
 | Run | Settings |
 | --- | --- |
-| Mars simulation | `MARS_SETTINGS`: entry conditions, vehicle parameters, update rate, playback speed |
+| Mars simulation | `MARS_SETTINGS`: entry conditions, vehicle and parachute parameters, update rate, playback speed |
 | Live Earth drop | `EARTH_SETTINGS`: detector thresholds, pressure corrections, hardware and laptop streaming |
 
 Earth uses the connected Sense HAT or automatically falls back to the emulator.
@@ -160,9 +160,17 @@ equations and records both model values and board readings; the EKF is not run.
 The mission window opens automatically; when the
 emulator is selected, its controls and live LED display open beside it. Closing
 the mission window stops the run and closes the windows. A separate process
-renders the four live altitude plots so rendering does not block the mission
-display or emulator. Plots are saved beside the CSV on completion, Stop and
-close.
+renders the live altitude plots so rendering does not block the mission
+display or emulator. The Mars windows and saved plots always use dark mode.
+
+Each Mars run saves its files in `logs/run_YYYYMMDD_HHMMSS_microseconds/`.
+The images are saved when the mission finishes or you choose **Stop and close**.
+
+- `run_<timestamp>.csv` with the flight and sensor data
+- `run_<timestamp>.png` with the full-flight plots
+- `run_<timestamp>_descent_detail.png` with the plots zoomed into descent
+- `final_mission_window.png` with the final mission readouts
+- `final_emulator.png` with the final emulator display when the emulator is open
 
 `MARS_SETTINGS['updates_per_sim_second'] = 3.0` in `run.py` sets the flight-state, display,
 and plot resolution per simulated second. The real update rate is this value
@@ -170,9 +178,9 @@ multiplied by `time_scale`: 3 Hz at 1x and 30 Hz at 10x. Every published state
 is plotted and logged. Sensors are still
 polled independently at up to 200 Hz, and RK4 uses internal steps no larger
 than 0.02 simulated seconds between state publications. `time_scale` defaults
-to 10 for Mars: ten simulated seconds pass per real second, so the current
-623-second entry takes about 63 real seconds. Set it to 1 for real time; the
-Earth recorder uses real elapsed time and is independent of these playback settings.
+to 10 for Mars, so the default flight reaches ground contact after about 76 real
+seconds (761 simulated seconds). Set it to 1 for real time. The Earth recorder
+uses real elapsed time and is independent of these playback settings.
 Select **1x**, **2x**, **5x**, **10x**, or **50x** beside mission time during a run.
 The default remains **10x**. State, mission-display, and plot refresh rates target
 3, 6, 15, 30, or 150 Hz
@@ -180,25 +188,41 @@ respectively. Mission time accumulates
 continuously across speed changes instead of being rescaled retroactively.
 Mars CSV columns are ordered as `time_s`, phase, calculated values, then raw
 sensor values. `time_s` is simulated mission time. Playback speed and sensor
-poll timestamps stay internal rather than adding CSV columns. Speed is along the flight path; altitude
-changes at `V * sin(FPA)`.
+poll timestamps stay internal. Speed is along the flight path, and altitude
+changes at `V * sin(FPA)`. The CSV and UDP telemetry include `downrange_m`,
+the distance along Mars's surface from entry interface. The model integrates
+its rate as `V * cos(FPA) * radius / (radius + altitude)`.
 
 `acceleration_m_s2` is the original speed derivative, `dV/dt`: negative when
 slowing and positive when speeding up. It is along the flight path, rather than
 vertical. `g_load` is that signed acceleration divided by local gravity.
 Downward motion is represented by negative `vertical_velocity_m_s`; accelerating
 downward in free fall increases speed, so `dV/dt` is positive in that case.
-There is one acceleration column; drag/lift forces remain internal to the flight
-equations and are not separate CSV columns.
+`vertical_acceleration_m_s2` is the derivative of vertical velocity, positive
+upward. The simulation also publishes `mach` and
+`equilibrium_speed_m_s`, which is populated during descending flight under canopy.
+The Mars CSV and downlink also report vehicle Cd, canopy Cd, effective Cl, and
+vehicle, canopy, and total drag. Canopy Cd is blank while stowed.
 
-Peak heating, strongest braking acceleration, and velocity are detected during the run; there is no
-analytical glide forecast. A peak is confirmed after the signal stays at least
-1% below its observed maximum for one simulated second for all three channels.
+The altitude plots are arranged in three columns. The first shows downrange,
+speed with local equilibrium speed, and vertical acceleration. The second
+shows flight-path angle, dynamic pressure, and Mach. The third shows drag,
+convective heating, and aerodynamic coefficients. A dotted line marks the exact deployment altitude.
+The drag plot preserves both sides of the instantaneous drag change.
+Use **Descent detail** in the plot window to zoom in on the canopy portion of
+the flight.
+
+Peak heating, entry peak deceleration, and peak velocity are detected during
+the run. A peak is confirmed after the signal stays at least 1% below its
+observed maximum for one simulated second. The first confirmed entry deceleration
+peak emits one `peak_acceleration` event. The `parachute_deploy` event carries the
+opening load and its along-path acceleration.
 The 8x8 LED display maps
 mission time left to right and altitude top to bottom. A dim cyan trail shows
-the trajectory; white marks the current position. Persistent peak markers are
-red for peak braking acceleration (stored negative), orange for heating, and purple
-for velocity, located at the maximum's actual time and altitude. Shared cells
+the trajectory. White marks the current position. Persistent event markers are red
+for entry peak deceleration, orange for peak heating, purple for peak velocity,
+blue for parachute deployment, and yellow for terminal descent. Markers use the
+event or peak's simulated time and altitude. Shared cells
 cycle through event colors every 0.6 real seconds instead of overwriting them.
 The purple velocity marker appears only after confirmation, at the maximum's
 recorded time and altitude. There is no unconfirmed purple/white preview.
@@ -213,19 +237,39 @@ LEDs clear when the application closes or a new
 run starts. The
 terminal reports the maximum's time and the later confirmation time. The CSV
 records the calculated values and phase; peak events appear in the terminal, the
-LED display, and the ground station downlink. A later, higher maximum rearms detection. A maximum at the
-end of a run remains unconfirmed if no sustained decrease has been observed.
+LED display, and the ground station downlink. A later, higher heating or velocity
+maximum rearms detection. Peaks awaiting a sustained decrease remain unconfirmed.
 
-Mars keeps the configured entry-interface altitude, speed, and FPA. The
-`target_fpa_deg` vehicle setting (default -5 degrees) enables planar bank-angle
-guidance: it rotates the lift vector to track a descending FPA, subject to the
-available lift. This is not an equilibrium-glide assumption. The model tracks
-vertical lift only; crossrange is not simulated. Remove `target_fpa_deg` to
-restore unguided lift-up flight. RK4 integration uses steps no larger than
-0.02 seconds, independent of GUI delays. Reaching zero altitude means surface
-contact; parachute and powered soft-landing dynamics are not implemented.
-Heating uses the planet's Sutton-Graves coefficient unless explicitly overridden
-in `vehicle_params`.
+Mars starts at the configured entry altitude, speed, and flight-path angle with
+fixed lift-up entry at zero bank. `MARS_SETTINGS['parachute']` configures the
+21.35 m disk-gap-band canopy and deployment and terminal
+descent thresholds. The deployment event fires while descending at Mach 1.8 or
+below, at or below 750 Pa dynamic pressure, and at or above 1,000 m altitude.
+The terminal prints `EVENT parachute_deploy` with altitude, speed, Mach, dynamic
+pressure, the change in total drag, and the along-path acceleration at opening.
+The UDP event includes
+the separate vehicle and canopy drag forces. The CSV captures the deployment
+state even when the crossing falls between regular samples.
+
+The model computes Mach at each RK4 stage from `V / sqrt(gamma * R * T)`.
+It uses the pure CO₂ gas constant of 188.9 J/(kg·K) for density and sound
+speed, and derives `gamma = cp / (cp - R)` from a temperature-dependent CO₂
+heat capacity. The current atmosphere is isothermal at 214 K, which gives
+a sound speed of about 232.3 m/s. [NASA/TM–2019-220019, Eq. 7](https://ntrs.nasa.gov/api/citations/20190001449/downloads/20190001449.pdf#page=12)
+
+The canopy adds its full drag immediately at deployment, using a
+[Mach-dependent drag curve from NASA's MSL model](https://ntrs.nasa.gov/api/citations/20130012762/downloads/20130012762.pdf#page=25).
+The flight model sums the vehicle and canopy drag areas and assumes zero
+effective lift under canopy. Terminal descent begins after the speed stays
+within 5% of local equilibrium speed and the magnitude of vertical acceleration
+stays at or below 0.10 m/s² for one simulated second. The terminal event reports
+both speeds, altitude, flight-path angle, and vertical acceleration.
+
+The separate landing warning fires when the altitude divided by the current
+descent rate reaches 10 seconds. It starts the pulsing green LED, which turns
+solid green at ground contact. This model ends at surface contact under canopy.
+Inflation loads, vehicle separation, and powered soft landing are outside the
+simulation. Heating uses the planet's Sutton-Graves coefficient.
 
 ## Headless Earth recording
 
@@ -269,7 +313,8 @@ EKF updates use actual elapsed time between fresh IMU polls. Poll timestamps,
 freshness/status flags, timing diagnostics, and the release timer remain internal
 and in laptop snapshots; they are omitted from the normal CSV.
 
-Files are created as `logs/drop_YYYYMMDD_HHMMSS_microseconds.csv`. Columns are ordered
+Each Earth run creates `logs/drop_<timestamp>/drop_<timestamp>.csv`. The desktop
+emulator saves `final_emulator.png` in the same folder. CSV columns are ordered
 as recording time (`time_s`), phase, calculated values, then raw sensor readings.
 Calculated values are EKF displacement, vertical velocity, acceleration bias,
 displacement/velocity uncertainty, acceleration magnitude, and corrected gyro

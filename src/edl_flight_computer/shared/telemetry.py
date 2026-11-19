@@ -1,6 +1,7 @@
 """Record flight calculations and raw board measurements in the same CSV."""
 
 import csv
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from .sensors import SENSOR_CHANNELS
@@ -8,13 +9,23 @@ from .sensors import SENSOR_CHANNELS
 # Mars CSV: time, phase, calculated values, sensor values
 HEADER = (
     'time_s', 'phase',
-    'altitude_m', 'velocity_m_s', 'flight_path_angle_rad',
+    'altitude_m', 'velocity_m_s', 'flight_path_angle_rad', 'downrange_m',
     'temperature_k', 'pressure_pa', 'density_kg_m3', 'gravity_m_s2',
     'dynamic_pressure_pa', 'bank_angle_deg',
     'vertical_velocity_m_s',
     'acceleration_m_s2', 'g_load', 'heating_kw_m2',
+    'mach', 'equilibrium_speed_m_s', 'vertical_acceleration_m_s2',
+    'vehicle_cd', 'parachute_cd', 'effective_cl',
+    'vehicle_drag_n', 'parachute_drag_n', 'total_drag_n',
     *SENSOR_CHANNELS,
 )
+
+
+def new_run_csv(prefix):
+    run_name = prefix + datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    run_dir = Path(__file__).resolve().parents[3] / 'logs' / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir / (run_name + '.csv')
 
 
 class DropLog:

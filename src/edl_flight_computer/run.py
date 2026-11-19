@@ -26,7 +26,16 @@ ENVIRONMENT_LIMITS = {
     'pressure': (900.0, 1100.0),           # hPa (sensor sanity / sealed-box leak)
 }
 
-# Mars initial conditions
+# Approximate nominal disk-gap-band drag coefficient vs. Mach (NASA 20130012762, Fig. 9).
+NASA_DRAG_CURVE_DGB = (
+    (0.00, 0.615), (0.80, 0.615), (0.85, 0.611), (0.90, 0.585),
+    (0.95, 0.489), (1.00, 0.594), (1.05, 0.659), (1.10, 0.680),
+    (1.20, 0.705), (1.30, 0.725), (1.50, 0.750), (1.60, 0.747),
+    (1.80, 0.686), (2.00, 0.577), (2.20, 0.520), (2.40, 0.495),
+    (2.60, 0.467),
+)
+
+# Mars initial conditions and descent settings
 MARS_SETTINGS = {
     'updates_per_sim_second': 3.0,
     'time_scale': 10.0,
@@ -43,7 +52,18 @@ MARS_SETTINGS = {
         'altitude_m': 120000.0,
         'velocity_m_s': 3000.0,
         'fpa_deg': -1.0,
-        'vehicle_params': {'CD': 1.5, 'CL': 0.5, 'mass': 8000.0, 'S': 15.0, 'Rn': 1, 'target_fpa_deg': -5.0},
+        'vehicle_params': {'CD': 1.5, 'CL': 0.5, 'mass': 3308.98, 'S': 15.0, 'Rn': 1},
+    },
+    'parachute': {
+        'number_chutes' : 1,
+        'diameter_m': 21.35,
+        'drag_curve': NASA_DRAG_CURVE_DGB,
+        'max_deploy_mach': 1.8,
+        'max_deploy_dynamic_pressure_pa': 800,
+        'min_deploy_altitude_m': 6000,
+        'terminal_speed_tolerance': 0.05,
+        'terminal_vertical_acceleration_tolerance_m_s2': 0.10,
+        'terminal_dwell_s': 1.0,
     },
 }
 

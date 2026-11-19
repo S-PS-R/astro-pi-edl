@@ -1,4 +1,4 @@
-"""An 8x8 altitude/time trajectory with persistent peak-event markers."""
+"""An 8x8 altitude/time trajectory with persistent mission event markers."""
 
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -6,12 +6,14 @@ from time import monotonic
 
 class TrajectoryLEDGrid:
     # Grid axes: time left to right; altitude top to bottom
-    # Shared peak cells: cycling event colors
+    # Shared event cells: cycling event colors
     # Bottom-right: flashing green countdown; solid green landed
     COLOURS = {
         'peak_acceleration': (255, 0, 0), #red
         'peak_heating': (255, 165, 0), #orange
         'peak_velocity': (128, 0, 128), #purple
+        'parachute_deploy': (0, 96, 255), #blue
+        'terminal_descent': (255, 230, 0), #yellow
     }
 
     def __init__(self, sense, initial_altitude_m, time_span_s=720.0):
@@ -82,7 +84,7 @@ class TrajectoryLEDGrid:
             x, y = self.cell(current_time_s, current_altitude_m, span, height)
             pixels[y*8 + x] = (180, 180, 180)
             
-        # Peak markers
+        # Event markers
         buckets = {}
         for name, time_s, altitude_m in events:
             x, y = self.cell(time_s, altitude_m, span, height)

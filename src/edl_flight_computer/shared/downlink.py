@@ -157,5 +157,6 @@ def landing_message(planet_name, mission_time_s, velocity_m_s, peaks):
              f'{velocity_m_s:.1f} m/s.']
     for name, peak in peaks.items():
         if peak.get('confirmed'):
-            lines.append(f"{name}: {peak['value']:.2f} {peak['units']} at {peak['time_s']:.1f} s")
+            label = 'Entry peak deceleration' if name == 'peak_acceleration' else name
+            lines.append(f"{label}: {peak['value']:.2f} {peak['units']} at {peak['time_s']:.1f} s")
     return '\n'.join(lines)
