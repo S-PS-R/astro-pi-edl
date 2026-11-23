@@ -115,9 +115,10 @@ class Downlink:
         self._send(self._packet('telemetry', time_s, data=data))
         return True
 
-    def event(self, name, time_s, message, **data):
+    def event(self, name, time_s, message, *, console_line=None, **data):
         """Send a critical event immediately and schedule repeat copies."""
-        print(f'EVENT {name} at T+{time_s:.2f} s: {message}', flush=True)
+        print(console_line if console_line is not None else f'EVENT {name} at T+{time_s:.2f} s: {message}',
+              flush=True)
         if not self.enabled:
             return
         self._event_id += 1
@@ -150,13 +151,3 @@ def open_downlink(settings, *, mission, run_id, telemetry_hz):
                         run_id=run_id, telemetry_hz=telemetry_hz)
     print(downlink.describe(), flush=True)
     return downlink
-
-
-def landing_message(planet_name, mission_time_s, velocity_m_s, peaks):
-    lines = [f'{planet_name.upper()} touchdown at T+{mission_time_s:.1f} s, '
-             f'{velocity_m_s:.1f} m/s.']
-    for name, peak in peaks.items():
-        if peak.get('confirmed'):
-            label = 'Entry peak deceleration' if name == 'peak_acceleration' else name
-            lines.append(f"{label}: {peak['value']:.2f} {peak['units']} at {peak['time_s']:.1f} s")
-    return '\n'.join(lines)

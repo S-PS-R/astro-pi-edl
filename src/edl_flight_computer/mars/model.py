@@ -2,11 +2,13 @@
 
 from bisect import bisect_left
 from dataclasses import dataclass
-from math import ceil, cos, exp, pi, sin, sqrt
+from math import asin, atan2, ceil, cos, degrees, exp, hypot, pi, radians, sin, sqrt
 
 import numpy as np
 
 from ..shared.phases import Phase
+from .entry_guidance import EntryGuidance, WindProfile
+from .powered_descent import PoweredDescent
 
 MAX_STEP_S = 0.02
 
@@ -14,8 +16,8 @@ MAX_STEP_S = 0.02
 MARS = {
     "name": "mars",
     "radius": 3389500.0, #m
-    "gravity": 3.73, #m/s^2
     "mu": 4.2828e13, #m³/s²
+    "rotation_rad_s": 2 * pi / (24.6229 * 3600),
     "T0": 214.0, #K
     "P0": 636.0, #Pa
     "gas_constant": 188.9,  # Pure CO₂, J/(kg·K)
@@ -115,6 +117,8 @@ def calculate_state(X, planet, vehicle_params, *, parachute=None, canopy_deploye
         'vertical_acceleration_m_s2': vertical_acceleration,
         'vehicle_cd': CD,
         'parachute_cd': parachute_cd,
+        # Combine drag areas on the vehicle reference area for a common Cd.
+        'effective_cd': (vehicle_drag_area + parachute_drag_area) / S,
         'effective_cl': effective_cl,
         'vehicle_drag_n': vehicle_drag,
         'parachute_drag_n': parachute_drag,
@@ -128,17 +132,116 @@ def calculate_state(X, planet, vehicle_params, *, parachute=None, canopy_deploye
     return np.array(derivatives), values
 
 
-def _rk4_step(X, step, derivatives):
-    k1 = derivatives(X)
-    k2 = derivatives(X + step * k1 / 2)
-    k3 = derivatives(X + step * k2 / 2)
-    k4 = derivatives(X + step * k3)
-    return X + step * (k1 + 2 * k2 + 2 * k3 + k4) / 6
+class SpatialFlight:
+    """Point-mass dynamics in Mars-fixed Cartesian coordinates."""
+
+    def __init__(self, planet, latitude_deg, longitude_deg, heading_deg, bank_deg=0.0):
+        lat, lon, heading = map(radians, (latitude_deg, longitude_deg, heading_deg))
+        self.up = np.array((cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat)))
+        east = np.array((-sin(lon), cos(lon), 0.0))
+        north = np.array((-sin(lat) * cos(lon), -sin(lat) * sin(lon), cos(lat)))
+        self.forward = cos(heading) * north + sin(heading) * east
+        self.left = sin(heading) * north - cos(heading) * east
+        self.omega = planet.get('rotation_rad_s', 0.0)
+        self.bank_deg = bank_deg
+        self.radius = planet['radius']
+
+    def initial_vector(self, altitude, inertial_speed, gamma):
+        position = (self.radius + altitude) * self.up
+        vx, vy, vz = inertial_speed * (cos(gamma) * self.forward + sin(gamma) * self.up)
+        x, y, _ = position
+        return np.array((*position, vx + self.omega * y, vy - self.omega * x, vz))
+
+    def calculate(self, vector, planet, vehicle, parachute, canopy_deployed, *,
+                  landing=None, phase=None, guidance=None, wind=None, time_s=0.0):
+        x, y, z, vx, vy, vz = vector[:6]
+        radius = hypot(x, y, z)
+        radial = (x / radius, y / radius, z / radius)
+        flat = landing is not None and landing.up is not None
+        ux, uy, uz = landing.up if flat else radial
+        altitude = landing.altitude(vector[:3]) if flat else radius - self.radius
+        speed = hypot(vx, vy, vz)
+        vertical_speed = vx * ux + vy * uy + vz * uz
+        horizontal_speed = hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
+        avx, avy, avz = vx, vy, vz
+        wind_east = wind_north = 0.0
+        if wind is not None:
+            wind_east, wind_north = wind.components(time_s, altitude)
+            longitude = atan2(y, x)
+            east_x, east_y = -sin(longitude), cos(longitude)
+            rx, ry, rz = radial
+            # North is up × east, using the planet-fixed geographic frame.
+            avx -= wind_east * east_x - wind_north * rz * east_y
+            avy -= wind_east * east_y + wind_north * rz * east_x
+            avz -= wind_north * (rx * east_y - ry * east_x)
+        air_speed = hypot(avx, avy, avz)
+        lx, ly, lz = uy * avz - uz * avy, uz * avx - ux * avz, ux * avy - uy * avx
+        air_horizontal = hypot(lx, ly, lz)
+        gamma = atan2(avx * ux + avy * uy + avz * uz, air_horizontal)
+        _, values = calculate_state((altitude, air_speed, gamma), planet, vehicle,
+                                    parachute=parachute, canopy_deployed=canopy_deployed)
+
+        gravity = values['gravity_m_s2']
+        omega = self.omega
+        # Gravity, Coriolis, and centrifugal acceleration in the rotating frame.
+        ax = -gravity * ux + 2 * omega * vy + omega**2 * x
+        ay = -gravity * uy - 2 * omega * vx + omega**2 * y
+        az = -gravity * uz
+        if flat:
+            ax, ay, az = -gravity * landing.up
+        mass = vehicle['mass']
+        bank_deg = self.bank_deg
+        if guidance is not None and phase is Phase.ENTRY and horizontal_speed > 0:
+            bank_deg = guidance.command(np.asarray(radial), vector[3:6])
+        if air_speed > 0:
+            along_path = (ax * avx + ay * avy + az * avz) / air_speed
+            if values['equilibrium_speed_m_s'] is not None:
+                drag_area = values['effective_cd'] * vehicle['S']
+                values['equilibrium_speed_m_s'] = (
+                    sqrt(2 * mass * along_path / (values['density_kg_m3'] * drag_area))
+                    if along_path > 0 else None)
+            drag = values['total_drag_n'] / (mass * air_speed)
+            ax, ay, az = ax - drag * avx, ay - drag * avy, az - drag * avz
+            if air_horizontal > air_speed * 1e-12 and not canopy_deployed and not flat:
+                # v × (up × v) is lift-up. Positive bank tilts lift to the right.
+                lift = values['dynamic_pressure_pa'] * vehicle['S'] * values['effective_cl'] / mass
+                bank = radians(bank_deg)
+                up_scale = lift * cos(bank) / (air_speed * air_horizontal)
+                right_scale = -lift * sin(bank) / air_horizontal
+                ax += up_scale * (avy * lz - avz * ly) + right_scale * lx
+                ay += up_scale * (avz * lx - avx * lz) + right_scale * ly
+                az += up_scale * (avx * ly - avy * lx) + right_scale * lz
+
+        fuel_flow = thrust_n = 0.0
+        if flat:
+            force, fuel_flow = landing.thrust(phase, altitude, vector[:3], vector[3:6], (ax, ay, az), mass, vector[6],
+                                              hold_horizontal=wind is not None)
+            thrust_n = np.linalg.norm(force)
+            ax, ay, az = np.array((ax, ay, az)) + force / mass
+        speed_dot = (ax * vx + ay * vy + az * vz) / speed if speed > 0 else 0.0
+        values.update(
+            latitude_deg=degrees(atan2(z, hypot(x, y))), longitude_deg=degrees(atan2(y, x)),
+            downrange_m=self.radius * atan2(np.dot(radial, self.forward), np.dot(radial, self.up)),
+            crossrange_m=self.radius * asin(max(-1.0, min(1.0, np.dot(radial, self.left)))),
+            bank_angle_deg=None if (canopy_deployed or flat) else bank_deg,
+            ground_speed_m_s=speed, wind_east_m_s=wind_east, wind_north_m_s=wind_north,
+            vertical_velocity_m_s=vertical_speed,
+            vertical_acceleration_m_s2=ax * ux + ay * uy + az * uz + (0 if flat else horizontal_speed**2 / radius),
+            acceleration_m_s2=speed_dot, g_load=speed_dot / gravity,
+        )
+        derivatives = (vx, vy, vz, ax, ay, az)
+        if landing is not None:
+            values.update(mass_kg=mass, propellant_kg=vector[6], thrust_n=thrust_n,
+                          propellant_flow_kg_s=fuel_flow, horizontal_speed_m_s=horizontal_speed)
+            if landing.target is not None:
+                values['landing_target_error_m'] = landing.target_error(radial)
+            derivatives += (-fuel_flow,)
+        return np.array(derivatives), values
 
 
 def advance_state(X, dt, planet, vehicle_params, max_step=MAX_STEP_S, *,
                   parachute=None, canopy_deployed=False):
-    """Integrate elapsed time with bounded RK4 steps; stop at surface contact."""
+    """Integrate elapsed time with bounded Euler steps; stop at surface contact."""
     X = np.array(X, dtype=float, copy=True)
     if dt <= 0 or X[0] <= 0:
         return X
@@ -150,7 +253,7 @@ def advance_state(X, dt, planet, vehicle_params, max_step=MAX_STEP_S, *,
                                canopy_deployed=canopy_deployed)[0]
 
     for _ in range(steps):
-        updated = _rk4_step(X, step, derivatives)
+        updated = X + step * derivatives(X)
         if updated[0] <= 0:
             # Ground crossing
             fraction = X[0] / (X[0] - updated[0])
@@ -167,26 +270,62 @@ class FlightEvent:
     time_s: float
     values: dict
     before_values: dict | None = None
+    phase: Phase | None = None
 
 
 class MarsTrajectory:
     """Advance the Mars physics and latch flight events in simulation time."""
 
-    def __init__(self, vector, planet, vehicle_params, parachute, phase=Phase.ENTRY):
-        self.vector = np.array((*vector, 0.0) if len(vector) == 3 else vector, dtype=float)
+    def __init__(self, vector, planet, vehicle_params, parachute, phase=Phase.ENTRY, *,
+                 entry_site=None, powered_landing=None, entry_guidance=None, wind=None):
+        self.spatial = SpatialFlight(planet, **entry_site) if entry_site is not None else None
+        if self.spatial is None and (entry_guidance is not None or wind is not None):
+            raise ValueError('Entry guidance and wind require an entry site')
+        self.guidance = EntryGuidance(**entry_guidance) if entry_guidance is not None else None
+        self.wind = WindProfile(**wind) if wind is not None else None
+        if self.spatial is not None:
+            self.vector = self.spatial.initial_vector(*vector)
+        else:
+            self.vector = np.array((*vector, 0.0) if len(vector) == 3 else vector, dtype=float)
         self.planet = planet
         self.vehicle_params = vehicle_params
+        self.landing = None
+        if powered_landing is not None:
+            if self.spatial is None or parachute is None:
+                raise ValueError('Powered landing requires an entry site and a parachute')
+            if phase not in (Phase.ENTRY, Phase.PARACHUTE_DESCENT, Phase.TERMINAL_DESCENT):
+                raise ValueError('Powered landing must start at entry or attached to the parachute')
+            propellant = powered_landing['propulsion']['propellant_kg']
+            dry_mass = (vehicle_params['mass'] - powered_landing['heatshield']['mass_kg']
+                        - powered_landing['backshell']['mass_kg'] - propellant)
+            if propellant < 0 or dry_mass <= 0:
+                raise ValueError('Entry mass must cover the propellant, jettisoned hardware and dry lander')
+            self.landing = PoweredDescent(powered_landing, self.spatial.radius)
+            self.vector = np.append(self.vector, propellant)
+            self.dry_attached_mass = vehicle_params['mass'] - propellant
         self.parachute = parachute
         self.phase = phase
-        self.canopy_deployed = phase in (Phase.PARACHUTE_DESCENT, Phase.TERMINAL_DESCENT)
+        self.canopy_deployed = phase in (Phase.PARACHUTE_DESCENT, Phase.TERMINAL_DESCENT,
+                                         Phase.HEATSHIELD_JETTISONED)
+        if self.landing is not None and self.canopy_deployed:
+            self.landing.chute_time_s = 0.0
         self.time_s = 0.0
         self.terminal_since_s = None
+        self.terminal_reported = phase is Phase.TERMINAL_DESCENT
         self.landing_warned = False
         self.values = self._calculate(self.vector)[1]
-        if self.vector[0] <= 0:
+        if self.values['altitude_m'] <= 0:
             self.phase = Phase.LANDED
 
-    def _calculate(self, vector):
+    def _calculate(self, vector, time_s=None):
+        if self.spatial is not None:
+            vehicle = self.vehicle_params
+            if self.landing is not None and self.landing.up is not None:
+                vehicle = dict(vehicle, mass=self.dry_attached_mass + vector[6])
+            return self.spatial.calculate(vector, self.planet, vehicle, self.parachute,
+                                          self.canopy_deployed, landing=self.landing, phase=self.phase,
+                                          guidance=self.guidance, wind=self.wind,
+                                          time_s=self.time_s if time_s is None else time_s)
         return calculate_state(vector, self.planet, self.vehicle_params,
                                parachute=self.parachute, canopy_deployed=self.canopy_deployed)
 
@@ -194,8 +333,15 @@ class MarsTrajectory:
         return self._calculate(vector)[0]
 
     def _sample(self, duration):
-        vector = _rk4_step(self.vector, duration, self._derivatives)
-        return vector, self._calculate(vector)[1]
+        derivatives = self._derivatives(self.vector)
+        vector = self.vector + duration * derivatives
+        if self.landing is not None and vector[6] < 0:
+            # Stop thrust exactly when the remaining propellant is used up.
+            burn_s = -self.vector[6] / derivatives[6]
+            vector = self.vector + burn_s * derivatives
+            vector[6] = 0.0
+            vector += (duration - burn_s) * self._calculate(vector, self.time_s + burn_s)[0]
+        return vector, self._calculate(vector, self.time_s + duration)[1]
 
     def _first_crossing(self, duration, endpoint, condition):
         """Locate a false-to-true crossing bracketed by the current state and endpoint."""
@@ -262,7 +408,9 @@ class MarsTrajectory:
             offset = max(0.0, deadline - self.time_s)
             _, values = self._sample(offset)
             if values['altitude_m'] > 0 and self._terminal_eligible(values):
-                self.phase = Phase.TERMINAL_DESCENT
+                self.terminal_reported = True
+                if self.landing is None:
+                    self.phase = Phase.TERMINAL_DESCENT
                 events.append(FlightEvent('terminal_descent', deadline, values))
         if not eligible_at_end:
             self.terminal_since_s = None
@@ -273,7 +421,7 @@ class MarsTrajectory:
         return downward_speed > 0 and values['altitude_m'] <= 10.0 * downward_speed
 
     def _record_landing_warning(self, duration, endpoint, events):
-        if self.landing_warned:
+        if self.phase is not Phase.VERTICAL_DESCENT or self.landing_warned:
             return
         if self._landing_warning_due(self.values):
             time, values = 0.0, self.values
@@ -285,40 +433,122 @@ class MarsTrajectory:
             self.landing_warned = True
             events.append(FlightEvent('landing_warning', self.time_s + time, values))
 
+    def _staging_transition(self, duration, endpoint):
+        """Return the first applicable staging event and its integration boundary."""
+        if self.landing is None:
+            return None
+        settings = self.landing.settings
+        delay = None
+        if self.phase in (Phase.PARACHUTE_DESCENT, Phase.TERMINAL_DESCENT):
+            name, phase = 'heatshield_jettison', Phase.HEATSHIELD_JETTISONED
+            delay = self.landing.chute_time_s + settings['heatshield']['delay_after_chute_s'] - self.time_s
+        elif self.phase is Phase.HEATSHIELD_JETTISONED:
+            name, phase = 'backshell_separation', Phase.BACKSHELL_SEPARATED
+            s = settings['backshell']
+
+            def due(values):
+                return (values['altitude_m'] <= s['separation_altitude_m']
+                        and values['ground_speed_m_s'] <= s['max_separation_speed_m_s']
+                        and values['vertical_velocity_m_s'] < 0)
+        elif self.phase is Phase.BACKSHELL_SEPARATED:
+            name, phase = 'powered_descent_start', Phase.POWERED_DESCENT
+            delay = self.landing.separation_time_s + settings['propulsion']['ignition_delay_s'] - self.time_s
+        elif self.phase is Phase.POWERED_DESCENT:
+            name, phase = 'vertical_descent_start', Phase.VERTICAL_DESCENT
+
+            def due(values):
+                target = self.landing.target
+                aligned = (target is None or values['landing_target_error_m'] <= target['tolerance_m']
+                           or values['altitude_m'] <= target['stop_divert_altitude_m'])
+                return aligned and values['horizontal_speed_m_s'] <= settings['propulsion']['horizontal_capture_m_s']
+        else:
+            return None
+
+        if delay is not None:
+            if delay > duration:
+                return None
+            time = max(0.0, delay)
+            sample = self._sample(time)
+        elif due(self.values):
+            time, sample = 0.0, (self.vector, self.values)
+        elif due(endpoint[1]):
+            time, sample = self._first_crossing(duration, endpoint, due)
+        else:
+            return None
+        if sample[1]['altitude_m'] > 0:
+            return name, phase, time, sample
+
+    def _apply_transition(self, phase):
+        self.phase = phase
+        if phase is Phase.PARACHUTE_DESCENT:
+            self.canopy_deployed = True
+            if self.landing is not None:
+                self.landing.chute_time_s = self.time_s
+        elif phase is Phase.HEATSHIELD_JETTISONED:
+            shield = self.landing.settings['heatshield']
+            self.dry_attached_mass -= shield['mass_kg']
+            self.vehicle_params = dict(self.vehicle_params, mass=self.vehicle_params['mass'] - shield['mass_kg'],
+                                       CD=shield['cd'], S=shield['area_m2'])
+            self.terminal_since_s = None
+        elif phase is Phase.BACKSHELL_SEPARATED:
+            shell = self.landing.settings['backshell']
+            self.landing.separate(self.vector[:3], self.time_s)
+            self.dry_attached_mass -= shell['mass_kg']
+            self.vehicle_params = dict(self.vehicle_params, CD=shell['lander_cd'], S=shell['lander_area_m2'], CL=0.0)
+            self.canopy_deployed = False
+        self.values = self._calculate(self.vector)[1]
+
+    def _contact_phase(self):
+        if self.landing is None:
+            return Phase.LANDED
+        s = self.landing.settings['propulsion']
+        soft = (self.phase is Phase.VERTICAL_DESCENT
+                and abs(self.values['vertical_velocity_m_s']) <= s['max_touchdown_vertical_m_s']
+                and self.values['horizontal_speed_m_s'] <= s['max_touchdown_horizontal_m_s'])
+        return Phase.LANDED if soft else Phase.IMPACT
+
     def advance(self, dt):
         """Advance at most dt seconds and return events at their crossing states."""
         events = []
         end_time = self.time_s + dt
-        while self.time_s < end_time and self.phase is not Phase.LANDED:
+        while self.time_s < end_time and self.phase not in (Phase.LANDED, Phase.IMPACT):
             duration = min(MAX_STEP_S, end_time - self.time_s)
             endpoint = self._sample(duration)
-            deployment = None
+            transition = None
             if self.phase is Phase.ENTRY and self.parachute is not None:
                 deployment = self._find_deployment(duration, endpoint)
-            if deployment is not None:
-                duration, endpoint = deployment
-            elif endpoint[0][0] <= 0:
+                if deployment is not None:
+                    transition = ('parachute_deploy', Phase.PARACHUTE_DESCENT, *deployment)
+            else:
+                transition = self._staging_transition(duration, endpoint)
+            if transition is not None:
+                name, phase, duration, endpoint = transition
+            elif endpoint[1]['altitude_m'] <= 0:
                 duration, endpoint = self._first_crossing(
                     duration, endpoint, lambda values: values['altitude_m'] <= 0)
                 contact_vector, _ = endpoint
-                contact_vector[0] = 0.0
-                endpoint = contact_vector, self._calculate(contact_vector)[1]
+                if self.landing is not None and self.landing.up is not None:
+                    contact_vector[:3] -= self.landing.altitude(contact_vector[:3]) * self.landing.up
+                elif self.spatial is not None:
+                    contact_vector[:3] *= self.spatial.radius / hypot(*contact_vector[:3])
+                else:
+                    contact_vector[0] = 0.0
+                contact_values = self._calculate(contact_vector, self.time_s + duration)[1]
+                contact_values['altitude_m'] = 0.0
+                endpoint = contact_vector, contact_values
 
-            if self.phase is Phase.PARACHUTE_DESCENT:
+            if self.canopy_deployed and not self.terminal_reported:
                 self._record_terminal(duration, endpoint, events)
             self._record_landing_warning(duration, endpoint, events)
             self.time_s += duration
             self.vector, self.values = endpoint
 
-            if deployment is not None:
+            if transition is not None:
                 before_values = self.values
-                self.canopy_deployed = True
-                self.phase = Phase.PARACHUTE_DESCENT
-                self.values = self._calculate(self.vector)[1]
-                events.append(FlightEvent('parachute_deploy', self.time_s, self.values,
-                                          before_values=before_values))
-            elif self.vector[0] <= 0:
-                self.phase = Phase.LANDED
+                self._apply_transition(phase)
+                events.append(FlightEvent(name, self.time_s, self.values, before_values, phase))
+            elif self.values['altitude_m'] <= 0:
+                self.phase = self._contact_phase()
 
         return sorted(events, key=lambda event: event.time_s)
 

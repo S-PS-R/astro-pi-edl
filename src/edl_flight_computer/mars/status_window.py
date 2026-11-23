@@ -22,7 +22,6 @@ class MissionWindow:
         self.finished = False
         self.latest = {}
         self.displayed = {}
-        self.previous_status = None
         self.fields = {}
         self.emulator = None
         self.refresh_ms = round(1000 / update_hz)
@@ -123,13 +122,14 @@ class MissionWindow:
         if self.finished or self.closed:
             for button in self.speed_buttons:
                 button.configure(state='disabled')
-            status = ('Run finished - close this window to exit'
-                      if latest.get('phase') == 'LANDED' else 'Run stopped')
+            if latest.get('phase') in ('LANDED', 'IMPACT'):
+                status = 'Run finished - close this window to exit'
+            else:
+                status = 'Run stopped'
         else:
             status = 'Running'
-        if status != self.previous_status:
+        if status != self.status.get():
             self.status.set(status)
-            self.previous_status = status
 
     def refresh(self):
         if self.closed:
@@ -153,16 +153,13 @@ class MissionWindow:
         if not self.closed:
             self.closed = True
             self.root.after_cancel(self.timer)
-            # Stop display loop
             self.root.quit()
 
     def save_plots(self):
-        """Request asynchronous saving; final shutdown also guarantees a save."""
         if not self.closed and not self.plot_save_requested:
             self.plot_save_requested = self.plotter.save(self.plot_path)
 
     def destroy(self):
-        """Release Tk widgets after the worker stops and plotting is saved."""
         try:
             self.update_display()
             self.save_final_windows()

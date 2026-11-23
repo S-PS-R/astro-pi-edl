@@ -12,6 +12,7 @@ import numpy as np
 
 from edl_flight_computer.earth import drop
 from edl_flight_computer.mars import sim
+from edl_flight_computer.mars.entry_guidance import WindProfile
 from edl_flight_computer.mars.led_grid import TrajectoryLEDGrid
 from edl_flight_computer.mars.model import (
     MARS, MarsTrajectory, advance_state, calculate_state, parachute_drag_coefficient,
@@ -30,9 +31,72 @@ INITIAL = MARS_SETTINGS['initial_conditions']
 VEHICLE = INITIAL['vehicle_params']
 PARACHUTE = MARS_SETTINGS['parachute']
 ENTRY_VECTOR = [INITIAL['altitude_m'], INITIAL['velocity_m_s'], radians(INITIAL['fpa_deg'])]
+EQUATORIAL_ENTRY = dict(latitude_deg=0.0, longitude_deg=0.0, heading_deg=90.0)
+
+
+def untargeted_landing():
+    return {key: value for key, value in MARS_SETTINGS['retro_prop'].items() if key != 'landing_target'}
 
 
 class FlightModelTests(TestCase):
+    def test_wind_seed_replays_regardless_of_sample_order(self):
+        settings = {key: value for key, value in MARS_SETTINGS['wind'].items() if key != 'enabled'}
+        first = WindProfile(**dict(settings, seed=42))
+        replay = WindProfile(**dict(settings, seed=42))
+        later = first.components(90.0, 2000.0)
+        self.assertEqual(first.components(25.0, 9000.0), replay.components(25.0, 9000.0))
+        self.assertEqual(later, replay.components(90.0, 2000.0))
+
+    def test_live_bank_steering_reduces_chute_deployment_cross_track_error(self):
+        guidance = sim.configured_entry_guidance(MARS_SETTINGS)
+        guidance.update(latitude_deg=0.1, longitude_deg=24.0)
+        wind = {key: value for key, value in MARS_SETTINGS['wind'].items() if key != 'enabled'}
+        wind['seed'] = 11
+        flights = [MarsTrajectory(ENTRY_VECTOR, MARS, VEHICLE, PARACHUTE, entry_site=EQUATORIAL_ENTRY,
+                                  powered_landing=untargeted_landing(), entry_guidance=controller, wind=wind)
+                   for controller in (None, guidance)]
+        normal = np.cross(flights[1].spatial.up, flights[1].guidance.target)
+        normal /= np.linalg.norm(normal)
+        errors = []
+        for flight in flights:
+            events = flight.advance(900)
+            deploy, = [event for event in events if event.name == 'parachute_deploy']
+            lat, lon = map(radians, (deploy.values['latitude_deg'], deploy.values['longitude_deg']))
+            up = (cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
+            errors.append(abs(MARS['radius'] * np.arcsin(np.dot(up, normal))))
+            self.assertIsNone(deploy.values['bank_angle_deg'])
+            self.assertIs(flight.phase, Phase.LANDED)
+        self.assertLess(errors[1], .65 * errors[0])
+
+    def test_propellant_exhaustion_stops_thrust_and_reports_impact(self):
+        settings = untargeted_landing()
+        settings = dict(settings, heatshield=dict(settings['heatshield'], delay_after_chute_s=0),
+                        propulsion=dict(settings['propulsion'], propellant_kg=.05))
+        flight = MarsTrajectory([2000, 265, radians(-19)], MARS, VEHICLE, PARACHUTE,
+                                Phase.PARACHUTE_DESCENT, entry_site=EQUATORIAL_ENTRY,
+                                powered_landing=settings)
+        flight.advance(60)
+        self.assertEqual(flight.phase, Phase.IMPACT)
+        self.assertEqual(flight.values['propellant_kg'], 0)
+        self.assertEqual(flight.values['thrust_n'], 0)
+        dropped_mass = settings['heatshield']['mass_kg'] + settings['backshell']['mass_kg']
+        self.assertAlmostEqual(flight.values['mass_kg'], VEHICLE['mass'] - dropped_mass - .05)
+
+    def test_spatial_rotation_and_banked_crossrange(self):
+        def trajectory(heading, bank):
+            return MarsTrajectory([30000, 2000, radians(-5)], MARS, VEHICLE, None,
+                                  entry_site=dict(latitude_deg=0, longitude_deg=0,
+                                                  heading_deg=heading, bank_deg=bank))
+
+        east, west, banked = trajectory(90, 0), trajectory(270, 0), trajectory(90, 20)
+        self.assertLess(east.values['total_drag_n'], west.values['total_drag_n'])
+        for flight in (east, west, banked):
+            flight.advance(10)
+        self.assertGreater(east.values['longitude_deg'], 0)
+        self.assertLess(west.values['longitude_deg'], 0)
+        self.assertAlmostEqual(east.values['crossrange_m'], 0)
+        self.assertLess(banked.values['crossrange_m'], -10)
+
     def test_downrange_is_the_surface_projection_of_horizontal_travel(self):
         height, speed, angle = 120000.0, 3000.0, radians(-5)
         state = [height, speed, angle, 0.0]
@@ -73,6 +137,10 @@ class FlightModelTests(TestCase):
                                / (mass * vector[1]))
         equilibrium_speed = canopy_values['equilibrium_speed_m_s']
         drag_area = VEHICLE['CD'] * VEHICLE['S'] + canopy_drag_area
+        self.assertEqual(entry_values['effective_cd'], VEHICLE['CD'])
+        self.assertAlmostEqual(canopy_values['effective_cd'], drag_area / VEHICLE['S'])
+        self.assertAlmostEqual(pressure * VEHICLE['S'] * canopy_values['effective_cd'],
+                               canopy_values['total_drag_n'])
         self.assertAlmostEqual(.5 * canopy_values['density_kg_m3'] * equilibrium_speed**2 * drag_area,
                                -mass * gravity * sin(vector[2]), delta=1e-5)
 
@@ -121,14 +189,14 @@ class FlightModelTests(TestCase):
         with redirect_stdout(io.StringIO()) as console:
             sim.publish_flight_event(deploy, grid, wire)
         text = console.getvalue()
-        self.assertEqual(text.count('EVENT parachute_deploy'), 1)
-        self.assertIn('Total drag rises', text)
+        opening_drag = deploy.values['total_drag_n'] / 1000
+        self.assertEqual(text, f'[0.00 s] [6000 m] EVENT parachute_deploy: {opening_drag:.1f} kN\n')
 
-    def test_rejected_pressure_envelope_still_allows_landing_warning(self):
+    def test_no_landing_warning_without_vertical_descent(self):
         flight = MarsTrajectory([5600.0, 399.6, radians(-25)], MARS, VEHICLE,
                                 dict(PARACHUTE, max_deploy_dynamic_pressure_pa=100))
         events = flight.advance(120)
-        self.assertEqual([event.name for event in events], ['landing_warning'])
+        self.assertEqual(events, [])
         self.assertEqual(flight.phase, Phase.LANDED)
         self.assertFalse(flight.canopy_deployed)
 
@@ -175,7 +243,8 @@ class VirtualWallTime:
 
 
 class MissionTests(TestCase):
-    def run_mars(self, playback):
+    def run_mars(self, playback, powered_landing=None, *, entry_site=EQUATORIAL_ENTRY,
+                 entry_guidance=None, wind=None):
         wall = VirtualWallTime()
         sense = SenseEmu(noise=False, realtime=False)
         grid = TrajectoryLEDGrid(sense, ENTRY_VECTOR[0])
@@ -214,20 +283,29 @@ class MissionTests(TestCase):
                   patch.object(grid, 'start_landing_countdown', check_countdown),
                   patch.object(downlink_module, 'monotonic', wall.monotonic),
                   patch.object(downlink_module, 'sleep', wall.sleep)):
-                sim.run_mission(sense, state, VEHICLE, window, grid, path, wire, parachute=PARACHUTE)
+                sim.run_mission(sense, state, VEHICLE, window, grid, path, wire, parachute=PARACHUTE,
+                                entry_site=entry_site, powered_landing=powered_landing,
+                                entry_guidance=entry_guidance, wind=wind)
             with path.open(newline='', encoding='utf-8') as stream:
                 rows = list(csv.DictReader(stream))
         receiver.close()
         self.assertEqual(wire.failed, 0)
         self.assertEqual(console.getvalue().count('EVENT parachute_deploy'), 1)
-        self.assertEqual(console.getvalue().count('EVENT peak_acceleration'), 1)
+        text = console.getvalue()
+        self.assertEqual(text.count('EVENT peak_acceleration'), 1)
+        self.assertNotIn('Entry peak deceleration:', text)
+        self.assertRegex(text, r'\[\d+\.\d{2} s\] \[0 m\] EVENT landing: \d+\.\d{2} m/s')
         self.assertGreater(receiver.runs[wire.run_id].received, len(received))
         self.assertEqual(window.latest['bank_angle_deg'], '')
         self.assertTrue(grid.landed)
-        self.assertEqual(warning_pixels, [(0, 255, 0), (0, 0, 0)])
+        self.assertEqual(warning_pixels, [(0, 255, 0), (0, 0, 0)] if powered_landing else [])
         self.assertEqual(grid.render()[-1], (0, 255, 0))
         self.assertIn('parachute_deploy', [name for name, _, _ in grid.events])
         self.assertIn('terminal_descent', [name for name, _, _ in grid.events])
+        if powered_landing:
+            markers = {name for name, _, _ in grid.events}
+            self.assertTrue({'entry_interface', 'heatshield_jettison', 'backshell_separation',
+                             'powered_descent_start'} <= markers)
         self.assertEqual(sum(name == 'peak_acceleration' for name, _, _ in grid.events), 1)
         before, after = deployment_samples[0]
         self.assertEqual(len(deployment_samples), 1)
@@ -236,14 +314,61 @@ class MissionTests(TestCase):
         self.assertGreater(after['total_drag_n'], 10 * before['total_drag_n'])
         return received, rows
 
+    def test_nominal_mars_mission_hits_configured_target(self):
+        guidance = sim.configured_entry_guidance(MARS_SETTINGS)
+        wind = {key: value for key, value in MARS_SETTINGS['wind'].items() if key != 'enabled'}
+        settings = MARS_SETTINGS['retro_prop']
+        received, rows = self.run_mars(10.0, settings, entry_site=INITIAL['entry_site'],
+                                       entry_guidance=guidance, wind=wind)
+        event_names = {packet.get('event') for packet in received}
+        self.assertTrue({'entry_interface', 'peak_heating', 'peak_acceleration', 'parachute_deploy',
+                         'heatshield_jettison', 'backshell_separation', 'terminal_descent',
+                         'powered_descent_start', 'landing_warning', 'landing'} <= event_names)
+        target = settings['landing_target']
+        self.assertEqual((target['latitude_deg'], target['longitude_deg']), (49.02, 188.15))
+        hit, = [packet for packet in received if packet.get('event') == 'landing_target_hit']
+        landing, = [packet for packet in received if packet.get('event') == 'landing']
+        self.assertTrue(landing['data']['landing_target_met'])
+        error = float(rows[-1]['landing_target_error_m'])
+        self.assertLess(error, target['tolerance_m'])
+        self.assertAlmostEqual(landing['data']['landing_target_error_m'], error)
+        self.assertAlmostEqual(hit['data']['longitude_deg'] % 360, 188.15, places=3)
+
+    def test_powered_landing_stages_fuel_and_touchdown(self):
+        settings = untargeted_landing()
+        received, rows = self.run_mars(30.0, settings)
+        names = ('parachute_deploy', 'heatshield_jettison', 'backshell_separation',
+                 'powered_descent_start', 'vertical_descent_start', 'landing_warning', 'landing')
+        events = [packet for packet in received if packet.get('event') in names]
+        self.assertEqual([event['event'] for event in events], list(names))
+        chute, shield, shell, ignition, vertical, warning, touchdown = events
+        self.assertLess(vertical['time_s'], warning['time_s'])
+        self.assertAlmostEqual(warning['data']['estimated_time_to_contact_s'], 10.0, places=5)
+        self.assertAlmostEqual(shield['time_s'] - chute['time_s'], settings['heatshield']['delay_after_chute_s'])
+        self.assertAlmostEqual(ignition['time_s'] - shell['time_s'], settings['propulsion']['ignition_delay_s'])
+        self.assertAlmostEqual(shell['data']['altitude_m'], settings['backshell']['separation_altitude_m'], places=3)
+        self.assertEqual(shield['data']['mass_kg'], VEHICLE['mass'] - settings['heatshield']['mass_kg'])
+        self.assertEqual(shell['data']['mass_kg'], shield['data']['mass_kg'] - settings['backshell']['mass_kg'])
+        self.assertLessEqual(vertical['data']['horizontal_speed_m_s'], settings['propulsion']['horizontal_capture_m_s'])
+        phases = {row['phase'] for row in rows}
+        self.assertTrue({'heatshield jettisoned', 'backshell separated', 'powered descent', 'vertical descent'} <= phases)
+        fuel = [float(row['propellant_kg']) for row in rows]
+        flow = [float(row['propellant_flow_kg_s']) for row in rows]
+        self.assertTrue(np.all(np.diff(fuel) <= 0))
+        self.assertTrue(any(rate > 0 for rate in flow))
+        self.assertGreater(fuel[-1], 0)
+        self.assertAlmostEqual(shell['data']['mass_kg'] - touchdown['data']['mass_kg'], fuel[0] - fuel[-1])
+        self.assertAlmostEqual(touchdown['data']['vertical_velocity_m_s'], -2.0, delta=.1)
+        self.assertLessEqual(touchdown['data']['horizontal_speed_m_s'], .2)
+
     def test_event_times_and_payloads_across_playback_rates(self):
         times = []
-        key_events = ['parachute_deploy', 'terminal_descent', 'landing_warning', 'landing']
+        key_events = ['parachute_deploy', 'terminal_descent', 'landing']
         for speed in (10.0, 50.0):
             received, rows = self.run_mars(speed)
             events = [packet for packet in received if packet.get('event') in key_events]
             self.assertEqual([packet['event'] for packet in events], key_events)
-            deploy, terminal, warning, landing = events
+            deploy, terminal, landing = events
             entry_peak, = [packet for packet in received if packet.get('event') == 'peak_acceleration']
             peak = entry_peak['data']['peak']
             self.assertEqual(peak['phase'], 'entry')
@@ -251,10 +376,9 @@ class MissionTests(TestCase):
             self.assertLess(deploy['data']['acceleration_m_s2'], peak['value'])
             self.assertEqual(landing['data']['peaks']['peak_acceleration'], peak)
             times.append([event['time_s'] for event in events])
-            self.assertAlmostEqual(deploy['data']['mach'], 1.75257, places=5)
-            self.assertAlmostEqual(deploy['data']['altitude_m'], 5996, delta=1)
-            self.assertAlmostEqual(deploy['data']['dynamic_pressure_pa'], 750, places=4)
-            self.assertAlmostEqual(deploy['data']['velocity_m_s'], 407.1065, places=4)
+            self.assertAlmostEqual(deploy['data']['mach'], PARACHUTE['max_deploy_mach'], places=5)
+            self.assertAlmostEqual(deploy['data']['altitude_m'], 7092, delta=2)
+            self.assertLessEqual(deploy['data']['dynamic_pressure_pa'], PARACHUTE['max_deploy_dynamic_pressure_pa'])
             self.assertAlmostEqual(deploy['data']['total_drag_n'],
                                    deploy['data']['parachute_drag_n'] + deploy['data']['vehicle_drag_n'])
             deployment_row = next(row for row in rows if row['phase'] == 'parachute descent')
@@ -263,8 +387,6 @@ class MissionTests(TestCase):
             data = terminal['data']
             self.assertLessEqual(abs(data['vertical_acceleration_m_s2']), .10)
             self.assertLessEqual(abs(data['velocity_m_s'] / data['equilibrium_speed_m_s'] - 1), .05)
-            self.assertAlmostEqual(data['flight_path_angle_rad'], -1.263, places=3)
-            self.assertAlmostEqual(warning['data']['estimated_time_to_contact_s'], 10.0, places=5)
             self.assertEqual(rows[-1]['phase'], 'landed')
             self.assertEqual(float(rows[-1]['time_s']), landing['time_s'])
             self.assertEqual(float(rows[-1]['altitude_m']), 0.0)
@@ -273,12 +395,15 @@ class MissionTests(TestCase):
             self.assertEqual(float(rows[0]['bank_angle_deg']), 0)
             self.assertEqual(rows[0]['equilibrium_speed_m_s'], '')
             self.assertTrue(np.all(np.diff([float(row['downrange_m']) for row in rows]) > 0))
+            self.assertAlmostEqual(float(rows[-1]['longitude_deg']), 23.164, places=2)
+            self.assertAlmostEqual(float(rows[-1]['crossrange_m']), 0.0)
             for key in ('mach', 'vertical_acceleration_m_s2', 'equilibrium_speed_m_s',
-                        'vehicle_cd', 'parachute_cd', 'effective_cl', 'total_drag_n', 'downrange_m'):
+                        'vehicle_cd', 'parachute_cd', 'effective_cd', 'effective_cl', 'total_drag_n',
+                        'downrange_m', 'crossrange_m', 'latitude_deg', 'longitude_deg'):
                 self.assertAlmostEqual(float(rows[-1][key]), received[-2]['data'][key])
-        np.testing.assert_allclose(times[0], [693.121, 739.516, 750.439, 760.541], atol=.01)
-        # Playback changes RK4 step boundaries, so allow 0.1 ms of numerical variation.
-        np.testing.assert_allclose(times[0], times[1], rtol=0, atol=1e-4)
+        np.testing.assert_allclose(times[0], [671.140, 720.641, 749.649], atol=.02)
+        # Playback changes Euler substep boundaries slightly.
+        np.testing.assert_allclose(times[0], times[1], rtol=0, atol=.01)
 
     def test_earth_drop_still_uses_its_own_phases_and_csv(self):
         wall = VirtualWallTime()

@@ -10,13 +10,17 @@ from .sensors import SENSOR_CHANNELS
 HEADER = (
     'time_s', 'phase',
     'altitude_m', 'velocity_m_s', 'flight_path_angle_rad', 'downrange_m',
+    'crossrange_m', 'latitude_deg', 'longitude_deg',
+    'ground_speed_m_s', 'wind_east_m_s', 'wind_north_m_s',
     'temperature_k', 'pressure_pa', 'density_kg_m3', 'gravity_m_s2',
     'dynamic_pressure_pa', 'bank_angle_deg',
     'vertical_velocity_m_s',
     'acceleration_m_s2', 'g_load', 'heating_kw_m2',
     'mach', 'equilibrium_speed_m_s', 'vertical_acceleration_m_s2',
-    'vehicle_cd', 'parachute_cd', 'effective_cl',
+    'vehicle_cd', 'parachute_cd', 'effective_cd', 'effective_cl',
     'vehicle_drag_n', 'parachute_drag_n', 'total_drag_n',
+    'mass_kg', 'propellant_kg', 'thrust_n', 'propellant_flow_kg_s', 'horizontal_speed_m_s',
+    'landing_target_error_m',
     *SENSOR_CHANNELS,
 )
 

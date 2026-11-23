@@ -9,15 +9,15 @@
 9. Collect accelerometer data during the terminal descent (you will need to release the lander/probe (Pi packaged somehow) and let it land, fly, bounce on the surface)
 10. Send a message at landing in the form of a text, email, or social media post
 
-Completed
-1. (NOT STARTED) Live demo pending
-2. (DONE)
-3. (DONE for modeled Mars phases) Deployment uses the configured Mach, dynamic pressure, and altitude limits while descending. Terminal descent uses the configured equilibrium-speed and vertical-acceleration tolerances. Ground contact occurs at zero altitude.
-4. (PARTIAL) Mars downlinks entry interface, peak heating, entry peak deceleration, peak velocity, parachute deployment with opening acceleration, start of terminal descent, the separate 10-second landing warning, and landing. Separation remains to be modeled.
-5. (DONE)
-6. (DONE)
-7. (DONE) Range checks on temperature, humidity, pressure (both missions) and gyro motion (Mars); limits in run.py fault_limits; tune temperature limit on packaged board
-8. (DONE) fault / fault_cleared events in UDP telecom stream; active faults in every telemetry packet and ground station status line. Response is reporting only (no LED or flight action)
-9. (DONE)
-10. (AT RISK) Landing email replaced by UDP landing event to ground station laptop; may not count as text, email, or social media post
-    - maybe we can do both, where the email just sends the end data + plots?
+Implementation and demo checklist
+
+- [ ] 1. Present the live flight computer demo on the Raspberry Pi.
+- [x] 2. Calculate each modeled Mars phase during the run. Use 1× playback for the real-time demo.
+- [x] 3. Define phase triggers. Chute deployment uses Mach, dynamic pressure, altitude, and descending motion. Shield jettison and engine ignition use timers. Backshell separation uses altitude and speed. The terminal-speed event uses equilibrium-speed and vertical-acceleration limits. Vertical descent uses lateral speed and target alignment or the divert cutoff. Touchdown occurs at zero altitude.
+- [x] 4. Print and downlink entry, peak heating, peak entry deceleration, chute deployment, heat shield jettison, backshell/chute separation, terminal and powered descent, and touchdown. The landing warning is a separate event.
+- [x] 5. Implement Sense HAT LED event markers and a pulsing estimated ten-second landing warning. Verify on the physical board during the live demo.
+- [x] 6. Read and log Sense HAT temperature, pressure, and humidity during simulated descent. Show a live sensor reading on the board during the demo.
+- [x] 7. Detect an induced out-of-range sensor reading that lasts at least 0.5 seconds. Demonstrate the stimulus on the packaged board. Gyro fault thresholds are optional and disabled by default.
+- [x] 8. Report faults and clears over UDP and include active faults in telemetry. The response is reporting only.
+- [x] 9. Record accelerometer data during terminal descent using the Earth drop recorder. Use the physical drop CSV as demo evidence.
+- [ ] 10. Send a landing text, email, or social media post. The implemented UDP landing event reaches the ground station. It does not match the listed delivery channels.

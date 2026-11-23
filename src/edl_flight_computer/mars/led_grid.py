@@ -7,13 +7,17 @@ from time import monotonic
 class TrajectoryLEDGrid:
     # Grid axes: time left to right; altitude top to bottom
     # Shared event cells: cycling event colors
-    # Bottom-right: flashing green countdown; solid green landed
+    # Bottom-right: flashing green countdown, solid green landed, red impact
     COLOURS = {
+        'entry_interface': (255, 255, 255), #white
         'peak_acceleration': (255, 0, 0), #red
         'peak_heating': (255, 165, 0), #orange
         'peak_velocity': (128, 0, 128), #purple
         'parachute_deploy': (0, 96, 255), #blue
         'terminal_descent': (255, 230, 0), #yellow
+        'heatshield_jettison': (255, 96, 96), #coral
+        'backshell_separation': (0, 220, 255), #cyan
+        'powered_descent_start': (255, 64, 180), #pink
     }
 
     def __init__(self, sense, initial_altitude_m, time_span_s=720.0):
@@ -23,6 +27,7 @@ class TrajectoryLEDGrid:
         self.points = []
         self.events = []
         self.landed = False
+        self.impacted = False
         self._countdown_started_at = None
         self._lock = Lock()
         self._stop = Event()
@@ -53,6 +58,10 @@ class TrajectoryLEDGrid:
         with self._lock:
             self.landed = True
 
+    def mark_impact(self):
+        with self._lock:
+            self.impacted = True
+
     def start_landing_countdown(self):
         """Latch the green warning until ground contact, without blocking."""
         with self._lock:
@@ -71,6 +80,7 @@ class TrajectoryLEDGrid:
             events = self.events.copy()
             span, height = self.time_span_s, self.altitude_max_m
             landed = self.landed
+            impacted = self.impacted
             countdown_started_at = self._countdown_started_at
 
         # Trajectory trail
@@ -79,7 +89,7 @@ class TrajectoryLEDGrid:
             x, y = self.cell(time_s, altitude_m, span, height)
             pixels[y*8 + x] = (0, 16, 24)  # Dim trajectory trail.
 
-        if points and not landed:
+        if points and not (landed or impacted):
             current_time_s, current_altitude_m = points[-1]
             x, y = self.cell(current_time_s, current_altitude_m, span, height)
             pixels[y*8 + x] = (180, 180, 180)
@@ -102,6 +112,8 @@ class TrajectoryLEDGrid:
         if landed:
             # Landed indicator
             pixels[7*8 + 7] = (0, 255, 0)
+        elif impacted:
+            pixels[7*8 + 7] = (255, 0, 0)
         elif countdown_started_at is not None:
             # Countdown pulse
             on = (now - countdown_started_at) % 1.0 < 0.5

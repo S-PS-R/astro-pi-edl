@@ -52,10 +52,21 @@ MARS_SETTINGS = {
         'altitude_m': 120000.0,
         'velocity_m_s': 3000.0,
         'fpa_deg': -1.0,
-        'vehicle_params': {'CD': 1.5, 'CL': 0.5, 'mass': 3308.98, 'S': 15.0, 'Rn': 1},
+        'entry_site': {'latitude_deg': 49.20143, 'longitude_deg': 151.24542,
+                       'heading_deg': 76.0, 'bank_deg': 0.0},
+        'vehicle_params': {'CD': 1.5, 'CL': 0.5, 'mass': 3308.98, 'S': 15.0, 'Rn': 4.5},
+    },
+    'entry_guidance': {
+        'enabled': True,
+        'waypoint_east_offset_deg': 0.90,
+        'max_bank_deg': 10.0, 'heading_gain': 5.0,
+    },
+    'wind': {
+        'enabled': True, 'seed': 40,
+        'min_surface_speed_m_s': 2.0, 'max_surface_speed_m_s': 10.0,
+        'gust_m_s': 3.0, 'gust_interval_s': 20.0, 'scale_height_m': 20000.0,
     },
     'parachute': {
-        'number_chutes' : 1,
         'diameter_m': 21.35,
         'drag_curve': NASA_DRAG_CURVE_DGB,
         'max_deploy_mach': 1.8,
@@ -64,6 +75,19 @@ MARS_SETTINGS = {
         'terminal_speed_tolerance': 0.05,
         'terminal_vertical_acceleration_tolerance_m_s2': 0.10,
         'terminal_dwell_s': 1.0,
+    },
+    'retro_prop': {
+        'landing_target': {'latitude_deg': 49.02, 'longitude_deg': 188.15, 'tolerance_m': 50.0,
+                           'response_time_s': 4.0, 'max_divert_speed_m_s': 18.0,
+                           'stop_divert_altitude_m': 180.0},
+        'heatshield': {'mass_kg': 264.72, 'delay_after_chute_s': 15.0, 'cd': 1.1, 'area_m2': 15.0},
+        'backshell': {'mass_kg': 189.9, 'separation_altitude_m': 2000.0,
+                      'max_separation_speed_m_s': 100.0, 'lander_cd': 1.0, 'lander_area_m2': 8.0},
+        'propulsion': {'propellant_kg': 360.0, 'max_thrust_n': 26000.0, 'specific_impulse_s': 220.0,
+                       'ignition_delay_s': 0.5, 'horizontal_capture_m_s': 0.1,
+                       'horizontal_braking_m_s2': 3.0, 'vertical_braking_m_s2': 3.0,
+                       'response_time_s': 1.0, 'target_descent_speed_m_s': 2.0,
+                       'max_touchdown_vertical_m_s': 2.5, 'max_touchdown_horizontal_m_s': 0.2},
     },
 }
 
