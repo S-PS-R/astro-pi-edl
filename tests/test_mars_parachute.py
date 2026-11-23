@@ -242,6 +242,28 @@ class VirtualWallTime:
         self.now += seconds
 
 
+class LEDGridTests(TestCase):
+    def test_position_blinks_over_event_markers_until_touchdown(self):
+        grid = TrajectoryLEDGrid(SenseEmu(noise=False, realtime=False), 8000, time_span_s=80)
+        grid.add_event('entry_interface', 0, 8000)
+        grid.add_sample(0, 8000)
+        grid.add_event('parachute_deploy', 40, 4000)
+        grid.add_sample(40, 4000)
+        chute_cell = 4 * 8 + 4
+
+        lit = grid.render(.25)
+        unlit = grid.render(.75)
+        self.assertEqual(lit[0], (0, 170, 110))
+        self.assertEqual(unlit[0], lit[0])
+        self.assertEqual(lit[chute_cell], (180, 180, 180))
+        self.assertEqual(unlit[chute_cell], grid.COLOURS['parachute_deploy'])
+
+        grid.mark_landed()
+        landed = grid.render(1.25)
+        self.assertEqual(landed[chute_cell], unlit[chute_cell])
+        self.assertEqual(landed[-1], (0, 255, 0))
+
+
 class MissionTests(TestCase):
     def run_mars(self, playback, powered_landing=None, *, entry_site=EQUATORIAL_ENTRY,
                  entry_guidance=None, wind=None):

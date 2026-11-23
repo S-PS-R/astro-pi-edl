@@ -9,7 +9,7 @@ class TrajectoryLEDGrid:
     # Shared event cells: cycling event colors
     # Bottom-right: flashing green countdown, solid green landed, red impact
     COLOURS = {
-        'entry_interface': (255, 255, 255), #white
+        'entry_interface': (0, 170, 110), #teal
         'peak_acceleration': (255, 0, 0), #red
         'peak_heating': (255, 165, 0), #orange
         'peak_velocity': (128, 0, 128), #purple
@@ -89,11 +89,6 @@ class TrajectoryLEDGrid:
             x, y = self.cell(time_s, altitude_m, span, height)
             pixels[y*8 + x] = (0, 16, 24)  # Dim trajectory trail.
 
-        if points and not (landed or impacted):
-            current_time_s, current_altitude_m = points[-1]
-            x, y = self.cell(current_time_s, current_altitude_m, span, height)
-            pixels[y*8 + x] = (180, 180, 180)
-            
         # Event markers
         buckets = {}
         for name, time_s, altitude_m in events:
@@ -108,6 +103,12 @@ class TrajectoryLEDGrid:
         for index, names in buckets.items():
             colours = [self.COLOURS[name] for name in names]
             pixels[index] = colours[tick % len(colours)]
+
+        # Blink over the trail and events, revealing the underlying color between flashes.
+        if points and not (landed or impacted) and now % 1.0 < 0.5:
+            current_time_s, current_altitude_m = points[-1]
+            x, y = self.cell(current_time_s, current_altitude_m, span, height)
+            pixels[y*8 + x] = (180, 180, 180)
 
         if landed:
             # Landed indicator

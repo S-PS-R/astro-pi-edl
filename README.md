@@ -232,10 +232,11 @@ peak emits one `peak_acceleration` event. The `parachute_deploy` event carries t
 opening load and its along-path acceleration.
 The 8x8 LED display maps
 mission time left to right and altitude top to bottom. A dim cyan trail shows
-the trajectory. White marks the current position. Persistent event markers are red
+the trajectory. The current position blinks white over the trail and event markers.
+Persistent event markers are red
 for entry peak deceleration, orange for peak heating, purple for peak velocity,
 blue for parachute deployment, yellow for terminal descent, coral for shield
-jettison, cyan for backshell separation, pink for engine ignition, and white for
+jettison, cyan for backshell separation, pink for engine ignition, and teal for
 entry interface. Markers use the
 event or peak's simulated time and altitude. Shared cells
 cycle through event colors every 0.6 real seconds instead of overwriting them.
