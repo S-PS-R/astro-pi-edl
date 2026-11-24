@@ -110,6 +110,10 @@ The opening-load estimate uses an MSL-style opening factor inspired by NASA's AS
 
 At separation the simulation fixes an up vector $\hat{\mathbf u}_s$ from the Mars radius at the separation point. Height becomes $h=\mathbf r\cdot\hat{\mathbf u}_s-R_M$, where the tangent plane at $h=0$ stands in for terrain. Gravity acts downward and rotation terms are omitted. The simulator still uses altitude-dependent gravity and atmospheric drag.
 
+### Equations of motion
+
+The force balance and propellant update follow Lecture 9b's *Propulsive Landing* example (PDF pp. 21–23). The simulator integrates the vector form with forward-Euler steps of at most 0.02 s. In the vertical, zero-drag limit, taking downward speed as positive reduces the force equation to $m\dot V=mg-T_z$, as in the lecture. [ASTE 577 Lecture 9b, Propulsion Trajectories](https://drive.google.com/file/d/1K7y4tdJjaknbGzhOy36Su2j5LTrhr9dR/view?usp=drivesdk)
+
 $$
 \begin{aligned}
 m\dot{\mathbf v} &= -mg(h)\hat{\mathbf u}_s+\mathbf F_D+
@@ -121,14 +125,31 @@ m\dot{\mathbf v}_h=\mathbf F_{D,h}+\mathbf T_h,\\
 \end{aligned}
 $$
 
-The speed schedule is $v_{\rm ref}=-\sqrt{v_f^2+2b\max(0,h)}$, where $v_f=2$ m/s and $b=3.12$ m/s². The loop uses $a_{\rm cmd}=-bv_z/|v_{\rm ref}|+(v_{\rm ref}-v_z)/\tau$, with response time $\tau=1$ s. During initial powered descent, the command is floored at zero. The controller subtracts the gravity-plus-drag vertical acceleration $a_{\rm free,z}$ when allocating vertical thrust. Upward thrust is limited to $T_{\max}$.
+Mars gravity $g(h)$ enters the trajectory equations. Earth standard gravity $g_0$ converts the specified $I_{sp}$ into effective exhaust speed. The propellant step is $m_{p,i+1}=m_{p,i}-\lVert\mathbf T_i\rVert\Delta t/(I_{sp}g_0)$. Vehicle mass during powered descent is the attached dry mass plus the remaining propellant.
+
+### Vertical braking and lateral guidance
+
+The guidance commands separate vertical and lateral thrust components to brake within the altitude available and steer toward the landing target. In Lecture 9b's gravity turn (PDF pp. 8–11), thrust points opposite the velocity and gravity bends the path toward vertical. The demo ignites at the configured 2,100 m separation crossing and sets thrust direction from the vertical speed error and horizontal guidance command.
+
+The vertical reference comes from constant-acceleration kinematics. For positive downward speeds and a remaining descent distance $h$, the net acceleration along the direction of motion is $-b$. Thus $v_f^2=V_{\rm ref}^2-2bh$. With the code's upward-positive convention, $v_{\rm ref}=-\sqrt{v_f^2+2b\max(0,h)}$, where $v_f=2$ m/s and $b=3.12$ m/s². Here $b$ is a nominal net braking acceleration. The controller adds a speed-error correction, $a_{\rm cmd}=-bv_z/|v_{\rm ref}|+(v_{\rm ref}-v_z)/\tau$, with $\tau=1$ s. During initial powered descent, the command is floored at zero. The controller subtracts gravity-plus-drag acceleration $a_{\rm free,z}$ to determine the upward thrust required.
 
 $$
 T_z=\min[T_{\max},\,m\max(0,a_{\rm cmd}-a_{\rm free,z})],\qquad
 \lVert\mathbf T_h\rVert\le\sqrt{\max(0,T_{\max}^2-T_z^2)}.
 $$
 
-The desired horizontal velocity is the tangent-plane displacement to the target divided by 4 s and capped at 18 m/s. It is zero below the divert cutoff. Horizontal acceleration is the velocity error divided by the 1 s response time and is capped at 3 m/s² before applying the thrust budget. The model uses an equivalent combined thrust vector. Individual engine mounts, throttle allocation, and attitude dynamics are outside the model.
+The lateral controller projects the offset to the target onto the landing plane and converts it to a desired horizontal velocity. It uses the velocity error to command horizontal acceleration. These flight-computer settings determine how the controller pursues the 1 km landing requirement.
+
+| Setting | Nominal value | Purpose |
+| --- | ---: | --- |
+| `landing_target.response_time_s` | 4 s | Divide the target offset by this time. A 40 m offset requests 10 m/s toward the target. |
+| `max_divert_speed_m_s` | 18 m/s | Cap desired horizontal speed while steering toward the target. |
+| `stop_divert_altitude_m` | 180 m | At or below this altitude, command zero horizontal velocity and continue braking sideways motion. |
+| `propulsion.response_time_s` | 1 s | Divide velocity error by this time to obtain an acceleration correction for both vertical and lateral guidance. |
+| `horizontal_braking_m_s2` | 3 m/s² | Cap commanded horizontal acceleration before allocating the remaining thrust. |
+| `horizontal_capture_m_s` | 0.1 m/s | Transition to final descent once speed is at or below this limit and the vehicle is inside the target radius or at or below the divert cutoff. |
+
+Vertical braking gets first claim on the 22.075 kN thrust budget. The remaining capacity limits the lateral component. The model uses one equivalent thrust vector and assumes it can reorient instantly. [Powered descent controller](../src/edl_flight_computer/mars/powered_descent.py) · [Nominal flight settings](../src/edl_flight_computer/run.py)
 
 ## 5. Workbook sizing and mission heritage
 

@@ -8,6 +8,7 @@ from time import monotonic
 import numpy as np
 
 from ..shared.appearance import ACCENT, BORDER, DARK_PLOT_STYLE, PANEL, TEXT, TRACE_COLORS, apply_tk_dark_theme
+from .model import MARS
 
 
 ALTITUDE_PANELS = (
@@ -39,19 +40,21 @@ TIME_PANELS = (
 TRACK_FIELDS = ('altitude_m', 'downrange_m', 'crossrange_m', 'longitude_deg', 'latitude_deg')
 TRACK_PEAKS = (('g_load', 'Max |g| (along path)', 's', '#f18fba'),
                ('heating_kw_m2', 'Max heating', 'v', '#ffd76a'))
+TARGET_RADIUS_M = 1000.0
+TARGET_STYLE = {'color': '#ff6068', 'linestyle': '--', 'linewidth': 1.4, 'zorder': 3}
 
 
 class PlotProcess:
     """Nonblocking sample delivery; plotting never runs on the mission thread."""
 
-    def __init__(self, update_hz=3.0):
+    def __init__(self, update_hz=3.0, *, landing_target=None):
         context = get_context('spawn')
         self.update_hz = context.Value('d', update_hz)
         self.deployment = context.Array('d', [float('nan')] * (len(TRACK_FIELDS) + 1))
         self.samples = context.Queue(maxsize=256)
         self.process = context.Process(
             target=run_plot_window,
-            args=(self.samples, self.update_hz, self.deployment),
+            args=(self.samples, self.update_hz, self.deployment, landing_target),
             name='EDL plots', daemon=True)
         self.last_sample = None
         self.process.start()
@@ -110,7 +113,7 @@ class PlotProcess:
 
 
 class FlightPlotWindow:
-    def __init__(self, samples, update_hz, deployment):
+    def __init__(self, samples, update_hz, deployment, *, landing_target=None):
         # Plot process GUI
         import tkinter as tk
         from tkinter import ttk
@@ -148,7 +151,8 @@ class FlightPlotWindow:
         with rc_context(DARK_PLOT_STYLE):
             self.figure = Figure(figsize=(12.6, 8.2), dpi=100)
             self.time_figure = Figure(figsize=(12.6, 8.2), dpi=100)
-            self.track = TrajectoryPlot(Figure(figsize=(12.6, 8.2), dpi=100))
+            self.track = TrajectoryPlot(Figure(figsize=(12.6, 8.2), dpi=100),
+                                        landing_target=landing_target)
             self.altitude_axes = create_flight_panels(self.figure)
             self.time_axes = create_flight_panels(self.time_figure, versus_time=True)
         self.canvases = {}
@@ -254,13 +258,13 @@ class FlightPlotWindow:
         self.root.after(self.refresh_ms, self.refresh)
 
 
-def run_plot_window(samples, update_hz, deployment):
-    window = FlightPlotWindow(samples, update_hz, deployment)
+def run_plot_window(samples, update_hz, deployment, landing_target=None):
+    window = FlightPlotWindow(samples, update_hz, deployment, landing_target=landing_target)
     window.root.mainloop()
 
 
 class TrajectoryPlot:
-    def __init__(self, figure):
+    def __init__(self, figure, *, landing_target=None):
         from matplotlib.ticker import MaxNLocator
 
         self.figure = figure
@@ -289,6 +293,30 @@ class TrajectoryPlot:
             marker_2d, = self.ground.plot([], [], marker=marker, color=color, linestyle='none',
                                           markersize=4, label=label)
             self.markers.append((label, marker_3d, marker_2d))
+        self.landing_target = landing_target
+        if landing_target is not None:
+            self.target_circle, = self.ground.plot([], [], label='1 km target radius', **TARGET_STYLE)
+            self.target_detail = self.ground.inset_axes([.54, .22, .43, .37])
+            self.target_detail.set_title('Landing target', fontsize=9)
+            self.target_detail.set_box_aspect(1)
+            radius_km = TARGET_RADIUS_M / 1000
+            span_km = 1.25 * radius_km
+            self.target_detail.set(xlim=(-span_km, span_km), ylim=(-span_km, span_km),
+                                   xticks=[], yticks=[])
+            self.target_path, = self.target_detail.plot([], [], color=ACCENT)
+            self.target_touchdown, = self.target_detail.plot([], [], 'o', color=TRACE_COLORS[2], markersize=4)
+            bearings = np.linspace(0, 2 * np.pi, 181)
+            east, north = np.sin(bearings), np.cos(bearings)
+            self.target_detail.plot(radius_km * east, radius_km * north, **TARGET_STYLE)
+            self.target_detail.plot([0], [0], '+', color=TARGET_STYLE['color'])
+            # Follow a great-circle arc of the requested radius at each bearing.
+            target_lat = np.radians(landing_target['latitude_deg'])
+            arc = TARGET_RADIUS_M / MARS['radius']
+            x = np.cos(target_lat) * np.cos(arc) - np.sin(target_lat) * np.sin(arc) * north
+            y = np.sin(arc) * east
+            z = np.sin(target_lat) * np.cos(arc) + np.cos(target_lat) * np.sin(arc) * north
+            self.ring_latitude = np.degrees(np.arctan2(z, np.hypot(x, y)))
+            self.ring_longitude_offset = np.degrees(np.arctan2(y, x))
         self.legend = self.ground.legend(loc='lower right', facecolor=PANEL, edgecolor=BORDER,
                                          labelcolor=TEXT, framealpha=1)
         self.data = np.empty((0, len(TRACK_FIELDS)))
@@ -324,6 +352,8 @@ class TrajectoryPlot:
         east = np.unwrap(longitude, period=360)
         self.path_3d.set_data_3d(downrange / 1000, crossrange / 1000, altitude / 1000)
         self.path_2d.set_data(east, latitude)
+        if self.landing_target is not None:
+            self.update_landing_target(east, latitude)
         events = [deployment, self.touchdown]
         events.extend(self.peaks[key][1] if key in self.peaks else None
                       for key, _, _, _ in TRACK_PEAKS)
@@ -345,8 +375,32 @@ class TrajectoryPlot:
         self.ground.relim()
         self.ground.autoscale_view()
         if np.ptp(latitude) < 1:
-            self.ground.set_ylim(min(latitude[0] - .5, latitude.min()),
-                                 max(latitude[0] + .5, latitude.max()), auto=True)
+            lower = min(latitude[0] - .5, latitude.min())
+            upper = max(latitude[0] + .5, latitude.max())
+            if self.landing_target is not None:
+                lower = min(lower, self.ring_latitude.min())
+                upper = max(upper, self.ring_latitude.max())
+            self.ground.set_ylim(lower, upper, auto=True)
+
+    def update_landing_target(self, east, latitude):
+        target_lon = self.landing_target['longitude_deg']
+        target_lat = self.landing_target['latitude_deg']
+        target_lon += 360 * round((east[-1] - target_lon) / 360)
+        self.target_circle.set_data(target_lon + self.ring_longitude_offset, self.ring_latitude)
+        # Project the close-up by great-circle distance and bearing from the target.
+        delta_lon = np.radians(east - target_lon)
+        lat = np.radians(latitude)
+        center = np.radians(target_lat)
+        east_component = np.cos(lat) * np.sin(delta_lon)
+        north_component = np.cos(center) * np.sin(lat) - np.sin(center) * np.cos(lat) * np.cos(delta_lon)
+        radial_component = np.sin(center) * np.sin(lat) + np.cos(center) * np.cos(lat) * np.cos(delta_lon)
+        sin_arc = np.hypot(east_component, north_component)
+        arc = np.arctan2(sin_arc, radial_component)
+        scale = np.divide(arc, sin_arc, out=np.ones_like(arc), where=sin_arc > 0) * MARS['radius'] / 1000
+        east_km, north_km = east_component * scale, north_component * scale
+        self.target_path.set_data(east_km, north_km)
+        if self.touchdown is not None:
+            self.target_touchdown.set_data([east_km[-1]], [north_km[-1]])
 
 
 def create_flight_panels(figure, *, versus_time=False):

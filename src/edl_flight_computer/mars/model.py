@@ -603,7 +603,8 @@ class MarsTrajectory:
                 event_values = self.values
                 if phase is Phase.PARACHUTE_DESCENT:
                     # Estimate opening shock for the event while integrating steady canopy drag.
-                    opening_factor = self.parachute.get('opening_factor', 1.0)
+                    if self.parachute is not None:
+                        opening_factor = self.parachute.get('opening_factor', 1.0)
                     event_values = dict(self.values, opening_factor=opening_factor,
                                         opening_load_n=opening_factor * self.values['parachute_drag_n'])
                 events.append(FlightEvent(name, self.time_s, event_values, before_values, phase))

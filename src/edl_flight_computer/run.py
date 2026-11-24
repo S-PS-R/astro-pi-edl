@@ -5,7 +5,6 @@
 # python -m edl_flight_computer.run earth
 
 import argparse
-
 from .mars.model import sphere_cone_areas
 from .shared.phases import Phase
 
@@ -64,7 +63,6 @@ MARS_SETTINGS = {
         'altitude_m': 120000.0,
         'velocity_m_s': 5330,
         'fpa_deg': -15.0,
-        # Entry longitude is tuned for the demo landing target and nominal wind.
         'entry_site': {'latitude_deg': 48.19735, 'longitude_deg': 173.30,
                        'heading_deg': 76.0, 'bank_deg': 0.0},
         # Representative constants inferred from the NASA guide's trim L/D and ballistic coefficient.

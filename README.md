@@ -217,7 +217,9 @@ The **Time plots** tab shows altitude, downrange, crossrange, bank angle, airspe
 along-path acceleration, dynamic pressure, drag, and aerodynamic lift against
 simulated mission time in seconds.
 The **Trajectory and ground track** tab pairs the 3D path with latitude and
-longitude, marking chute deployment and ground contact.
+longitude, marking chute deployment and ground contact. A dashed red circle
+shows the 1 km radius around the configured landing target, with a close-up
+of the target area.
 
 Bank steering and wind are on by default. Both have an `enabled` flag in `run.py`.
 The heading controller banks toward a waypoint during entry. The waypoint uses

@@ -14,7 +14,7 @@ def format_reading(value):
 
 
 class MissionWindow:
-    def __init__(self, planet_name, plot_path, updates_per_sim_second, time_scale):
+    def __init__(self, planet_name, plot_path, updates_per_sim_second, time_scale, *, landing_target=None):
         self.sim_clock = SimulationClock(time_scale)
         self.updates_per_sim_second = updates_per_sim_second
         update_hz = updates_per_sim_second * time_scale
@@ -72,7 +72,7 @@ class MissionWindow:
         ttk.Button(panel, text='Stop and close', command=self.close).grid(
             row=len(labels) + 2, column=0, columnspan=3, sticky='w', pady=(12, 0))
         self.root.protocol('WM_DELETE_WINDOW', self.close)
-        self.plotter = PlotProcess(update_hz=update_hz)
+        self.plotter = PlotProcess(update_hz=update_hz, landing_target=landing_target)
         self.timer = self.root.after(self.refresh_ms, self.refresh)
 
     def set_speed(self, scale):

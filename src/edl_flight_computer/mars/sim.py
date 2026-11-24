@@ -303,8 +303,10 @@ def main(settings=None):
     sense.clear()
     output_path = new_run_csv('run_')
     led_grid = TrajectoryLEDGrid(sense, state.altitude_m)
+    powered_landing = settings.get('retro_prop') or {}
     window = MissionWindow(planet_name, output_path.with_suffix('.png'),
-                           updates_per_sim_second, time_scale)
+                           updates_per_sim_second, time_scale,
+                           landing_target=powered_landing.get('landing_target'))
     if is_simulated():
         window.open_emulator(sense)
 
