@@ -15,8 +15,8 @@ class PoweredDescent:
         self.settings = settings
         self.radius = radius
         self.up: NDArray[np.float64] | None = None
-        self.chute_time_s = None
-        self.separation_time_s = None
+        self.chute_time_s: float | None = None
+        self.separation_time_s: float | None = None
         self.target = settings.get('landing_target')
         self.target_up = None
         if self.target is not None:

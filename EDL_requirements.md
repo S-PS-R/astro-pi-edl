@@ -13,8 +13,8 @@ Implementation and demo checklist
 
 - [ ] 1. Present the live flight computer demo on the Raspberry Pi.
 - [x] 2. Calculate each modeled Mars phase during the run. Use 1× playback for the real-time demo.
-- [x] 3. Define phase triggers. Chute deployment uses Mach, dynamic pressure, altitude, and descending motion. Shield jettison and engine ignition use timers. Backshell separation uses altitude and speed. The terminal-speed event uses equilibrium-speed and vertical-acceleration limits. Vertical descent uses lateral speed and target alignment or the divert cutoff. Touchdown occurs at zero altitude.
-- [x] 4. Print and downlink entry, peak heating, peak entry deceleration, chute deployment, heat shield jettison, backshell/chute separation, terminal and powered descent, and touchdown. The landing warning is a separate event.
+- [x] 3. Define phase triggers. The chute opens at Mach 1.8. The heat shield and TPS drop 20 simulated seconds later. The backshell and chute separate at 2,100 m after heat shield release, and the engines ignite immediately. The canopy equilibrium event uses equilibrium-speed and vertical-acceleration limits for telemetry. Vertical descent uses lateral speed and target alignment or the divert cutoff. Contact occurs at zero altitude.
+- [x] 4. Print and downlink entry, peak heating, peak entry deceleration, chute deployment, heat shield jettison, near-terminal descent, backshell/chute separation, powered descent start with mass and airspeed, and touchdown. The landing warning is a separate event.
 - [x] 5. Implement Sense HAT LED event markers and a pulsing estimated ten-second landing warning. Verify on the physical board during the live demo.
 - [x] 6. Read and log Sense HAT temperature, pressure, and humidity during simulated descent. Show a live sensor reading on the board during the demo.
 - [x] 7. Detect an induced out-of-range sensor reading that lasts at least 0.5 seconds. Demonstrate the stimulus on the packaged board. Gyro fault thresholds are optional and disabled by default.

@@ -7,7 +7,7 @@ from ..shared.downlink import open_downlink
 from ..shared.faults import FaultMonitor
 from ..shared.hardware import get_hat, is_simulated
 from .led_grid import TrajectoryLEDGrid
-from .model import MARS, MarsTrajectory, PeakTracker
+from .model import DeploymentWindowMissed, MARS, MarsTrajectory, PeakTracker
 from ..shared.sensors import SensorReader
 from .state import Phase, initialize
 from ..shared.telemetry import DropLog, new_run_csv
@@ -15,7 +15,6 @@ from ..shared.telemetry import DropLog, new_run_csv
 PEAK_LABELS = {
     'peak_acceleration': 'Entry peak deceleration',
     'peak_heating': 'Peak heating',
-    'peak_velocity': 'Peak velocity',
 }
 SENSOR_UNITS = {
     'accel': 'g', 'gyro': 'rad/s', 'mag': 'µT', 'pressure': 'hPa',
@@ -39,21 +38,27 @@ def publish_flight_event(event, led_grid, downlink):
         before_drag = event.before_values['total_drag_n']
         total_drag = values['total_drag_n']
         opening_acceleration = values['acceleration_m_s2']
-        publish_event(downlink, event.name, event.time_s, altitude, f'{total_drag / 1000:.1f} kN',
+        opening_load = values['opening_load_n']
+        opening_factor = values['opening_factor']
+        reading = f'Mach {mach:.2f}, estimated opening load {opening_load / 1000:.1f} kN'
+        publish_event(downlink, event.name, event.time_s, altitude, reading,
                        f'Parachute deployed at {altitude:.0f} m, Mach {mach:.2f}, '
                        f'{speed:.1f} m/s and {pressure:.0f} Pa dynamic pressure. '
+                       f'Estimated canopy opening load {opening_load / 1000:.1f} kN '
+                       f'(opening factor {opening_factor:g}). '
                        f'Total drag rises from {before_drag / 1000:.1f} to {total_drag / 1000:.1f} kN. '
-                       f'Along-path acceleration at opening is {opening_acceleration:.1f} m/s^2.',
+                       f'Modeled along-path acceleration at deployment is {opening_acceleration:.1f} m/s^2.',
                        velocity_m_s=speed, mach=mach,
                        dynamic_pressure_pa=pressure, vehicle_drag_n=values['vehicle_drag_n'],
                        parachute_drag_n=values['parachute_drag_n'], total_drag_n=total_drag,
+                       opening_factor=opening_factor, opening_load_n=opening_load,
                        acceleration_m_s2=opening_acceleration)
         led_grid.add_event(event.name, event.time_s, altitude)
-    elif event.name == 'terminal_descent':
+    elif event.name == 'near_terminal_descent':
         equilibrium = values['equilibrium_speed_m_s']
         led_grid.add_event(event.name, event.time_s, altitude)
         publish_event(downlink, event.name, event.time_s, altitude, f'{speed:.2f} m/s',
-                       f'Terminal descent at {altitude:.0f} m, '
+                       f'Near-terminal descent at {altitude:.0f} m, '
                        f'{speed:.1f} m/s near the {equilibrium:.1f} m/s equilibrium speed',
                        velocity_m_s=speed, equilibrium_speed_m_s=equilibrium,
                        flight_path_angle_rad=values['flight_path_angle_rad'],
@@ -61,19 +66,17 @@ def publish_flight_event(event, led_grid, downlink):
     elif event.name == 'landing_warning':
         downward_speed = -values['vertical_velocity_m_s']
         led_grid.start_landing_countdown()
-        estimate = altitude / downward_speed
+        estimate = values['estimated_time_to_contact_s']
         publish_event(downlink, event.name, event.time_s, altitude, f'{estimate:.2f} s',
-                       f'{estimate:.2f} seconds to ground at the current descent rate of {downward_speed:.1f} m/s '
-                       f'from {altitude:.0f} m altitude',
+                       f'Estimated {estimate:.2f} seconds to touchdown under braking. '
+                       f'Descent rate {downward_speed:.1f} m/s at {altitude:.0f} m altitude.',
                        descent_rate_m_s=downward_speed, estimated_time_to_contact_s=estimate)
     elif event.phase is not None:
         led_grid.add_event(event.name, event.time_s, altitude)
-        if event.phase in (Phase.HEATSHIELD_JETTISONED, Phase.BACKSHELL_SEPARATED):
-            reading = f'{event.before_values["mass_kg"] - values["mass_kg"]:.1f} kg'
-        elif event.phase is Phase.POWERED_DESCENT:
-            reading = f'{values["thrust_n"] / 1000:.2f} kN'
+        if event.phase is Phase.POWERED_DESCENT:
+            reading = f'{values["mass_kg"]:.1f} kg, {speed:.1f} m/s airspeed'
         else:
-            reading = f'{values["horizontal_speed_m_s"]:.2f} m/s'
+            reading = f'{event.before_values["mass_kg"] - values["mass_kg"]:.1f} kg'
         publish_event(downlink, event.name, event.time_s, altitude, reading,
                        f'{event.phase.value.capitalize()} at {altitude:.0f} m and {speed:.1f} m/s. '
                        f'Mass {values["mass_kg"]:.1f} kg, propellant {values["propellant_kg"]:.1f} kg.',
@@ -86,11 +89,12 @@ def publish_peaks(peak_tracker, time_s, values, led_grid, downlink, *, track_ent
     for name, peak in peak_tracker.update_peaks(
             time_s, values, track_entry_deceleration=track_entry_deceleration):
         led_grid.add_event(name, peak['time_s'], peak['altitude_m'])
-        reading = f"{peak['value']:.2f} {peak['units']}"
+        velocity = peak['velocity_m_s']
+        reading = f"{peak['value']:.2f} {peak['units']} at {velocity:.2f} m/s"
         publish_event(downlink, name, time_s, peak['altitude_m'], reading,
                       f"{PEAK_LABELS.get(name, name)}: {reading} "
                       f"at T+{peak['time_s']:.1f} s, altitude {peak['altitude_m']:.0f} m",
-                      observed_time_s=peak['time_s'], peak=peak)
+                      observed_time_s=peak['time_s'], velocity_m_s=velocity, peak=peak)
 
 # Main run
 def run_mission(sense, state, vehicle_params, window, led_grid, output_path, downlink,
@@ -165,20 +169,37 @@ def run_mission(sense, state, vehicle_params, window, led_grid, output_path, dow
                 next_update_time = real_time + update_period_s
 
             # Flight calculation
-            events = trajectory.advance(mission_time_s - trajectory.time_s)
+            try:
+                events = trajectory.advance(mission_time_s - trajectory.time_s)
+            except DeploymentWindowMissed as error:
+                state.elapsed_s = trajectory.time_s
+                state.altitude_m = trajectory.values['altitude_m']
+                publish_event(downlink, 'deployment_failed', state.elapsed_s, state.altitude_m,
+                              'window missed', str(error), mach=trajectory.values['mach'],
+                              dynamic_pressure_pa=trajectory.values['dynamic_pressure_pa'])
+                log.write({'time_s': state.elapsed_s, 'phase': 'deployment failed',
+                           **trajectory.values, **sensor_readings})
+                led_grid.mark_impact()
+                led_grid.render()
+                break
             flight_values = trajectory.values
             state.altitude_m = flight_values['altitude_m']
             state.velocity_m_s = flight_values['velocity_m_s']
             state.flight_path_angle_rad = flight_values['flight_path_angle_rad']
             state.elapsed_s = mission_time_s = trajectory.time_s
-            state.phase = trajectory.phase
+            # Both powered flight modes share one phase in the mission readouts.
+            state.phase = (Phase.POWERED_DESCENT if trajectory.phase is Phase.VERTICAL_DESCENT
+                           else trajectory.phase)
             landed = state.phase is Phase.LANDED
             contact = landed or state.phase is Phase.IMPACT
 
             for event in events:
                 if event.name == 'parachute_deploy':
                     publish_peaks(peak_tracker, event.time_s, event.before_values, led_grid, downlink)
-                    window.plot_deployment(event.before_values, event.values)
+                    window.plot_deployment(event.time_s, event.before_values, event.values)
+                    if event.time_s == mission_time_s:
+                        flight_values = dict(flight_values, opening_factor=event.values['opening_factor'],
+                                             opening_load_n=event.values['opening_load_n'])
                 if event.phase is not None and event.time_s < mission_time_s:
                     log.write({'time_s': event.time_s, 'phase': event.phase.value, **event.values, **sensor_readings})
                 publish_flight_event(event, led_grid, downlink)

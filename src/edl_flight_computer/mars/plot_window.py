@@ -10,7 +10,7 @@ import numpy as np
 from ..shared.appearance import ACCENT, BORDER, DARK_PLOT_STYLE, PANEL, TEXT, TRACE_COLORS, apply_tk_dark_theme
 
 
-PANELS = (
+ALTITUDE_PANELS = (
     ('Downrange', 'Range (km)', .001, (('downrange_m', 'Downrange'),)),
     ('Flight-path angle', 'Angle (deg)', degrees(1),
      (('flight_path_angle_rad', 'Flight-path angle'),)),
@@ -24,7 +24,21 @@ PANELS = (
     ('Aerodynamic coefficients', 'Coefficient', 1,
      (('effective_cd', 'Total Cd'), ('effective_cl', 'Total Cl'))),
 )
+TIME_PANELS = (
+    ('Altitude', 'Altitude (km)', .001, (('altitude_m', 'Altitude'),)),
+    ('Downrange', 'Range (km)', .001, (('downrange_m', 'Downrange'),)),
+    ('Crossrange', 'Crossrange (km)', .001, (('crossrange_m', 'Crossrange'),)),
+    ('Bank angle', 'Bank angle (deg)', 1, (('bank_angle_deg', 'Bank angle'),)),
+    ('Velocity', 'Airspeed (m/s)', 1, (('velocity_m_s', 'Airspeed'),)),
+    ('Acceleration', 'Along-path acceleration (m/s²)', 1,
+     (('acceleration_m_s2', 'Along-path acceleration'),)),
+    ('Dynamic pressure', 'Dynamic pressure (Pa)', 1, (('dynamic_pressure_pa', 'Dynamic pressure'),)),
+    ('Drag force', 'Total drag (kN)', .001, (('total_drag_n', 'Total drag'),)),
+    ('Lift force', 'Aerodynamic lift (kN)', .001, (('lift_n', 'Aerodynamic lift'),)),
+)
 TRACK_FIELDS = ('altitude_m', 'downrange_m', 'crossrange_m', 'longitude_deg', 'latitude_deg')
+TRACK_PEAKS = (('g_load', 'Max |g| (along path)', 's', '#f18fba'),
+               ('heating_kw_m2', 'Max heating', 'v', '#ffd76a'))
 
 
 class PlotProcess:
@@ -33,7 +47,7 @@ class PlotProcess:
     def __init__(self, update_hz=3.0):
         context = get_context('spawn')
         self.update_hz = context.Value('d', update_hz)
-        self.deployment = context.Array('d', [float('nan')] * len(TRACK_FIELDS))
+        self.deployment = context.Array('d', [float('nan')] * (len(TRACK_FIELDS) + 1))
         self.samples = context.Queue(maxsize=256)
         self.process = context.Process(
             target=run_plot_window,
@@ -49,7 +63,7 @@ class PlotProcess:
         self._queue_samples((sample,))
 
     def add_deployment(self, before, after):
-        self.deployment[:] = [after.get(key, float('nan')) for key in TRACK_FIELDS]
+        self.deployment[:] = [after.get(key, float('nan')) for key in (*TRACK_FIELDS, 'time_s')]
         self._queue_samples((before, after))
 
     def _queue_samples(self, samples):
@@ -123,30 +137,32 @@ class FlightPlotWindow:
         self.tabs = ttk.Notebook(self.root)
         self.tabs.pack(fill='both', expand=True)
         altitude_tab = ttk.Frame(self.tabs)
+        time_tab = ttk.Frame(self.tabs)
         track_tab = ttk.Frame(self.tabs)
         self.tabs.add(altitude_tab, text='Altitude plots')
+        self.tabs.add(time_tab, text='Time plots')
         self.tabs.add(track_tab, text='Trajectory and ground track')
-        self.track_tab = track_tab
         self.detail_control = ttk.Checkbutton(altitude_tab, text='Descent detail', variable=self.descent_detail, command=self.change_altitude_view)
         self.detail_control.state(['disabled'])
         self.detail_control.pack(anchor='e', padx=14, pady=(8, 0))
         with rc_context(DARK_PLOT_STYLE):
             self.figure = Figure(figsize=(12.6, 8.2), dpi=100)
-            self.figure.subplots_adjust(left=.07, right=.97, bottom=.08, top=.94, wspace=.32, hspace=.46)
-            grid = self.figure.add_gridspec(3, 3)
+            self.time_figure = Figure(figsize=(12.6, 8.2), dpi=100)
             self.track = TrajectoryPlot(Figure(figsize=(12.6, 8.2), dpi=100))
-            self.altitude_axes = create_altitude_panels(self.figure, grid)
-        self.track_canvas = FigureCanvasTkAgg(self.track.figure, master=track_tab)
-        self.track_canvas.get_tk_widget().pack(fill='both', expand=True)
+            self.altitude_axes = create_flight_panels(self.figure)
+            self.time_axes = create_flight_panels(self.time_figure, versus_time=True)
+        self.canvases = {}
+        for tab, figure in ((altitude_tab, self.figure), (time_tab, self.time_figure),
+                            (track_tab, self.track.figure)):
+            canvas = FigureCanvasTkAgg(figure, master=tab)
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+            self.canvases[str(tab)] = canvas
         self.tabs.bind('<<NotebookTabChanged>>', self.draw_selected_tab)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=altitude_tab)
-        self.canvas.get_tk_widget().pack(fill='both', expand=True)
-        self.canvas.draw()
+        self.draw_selected_tab()
         self.root.after(self.refresh_ms, self.refresh)
 
     def draw_selected_tab(self, _event=None):
-        canvas = self.track_canvas if self.tabs.select() == str(self.track_tab) else self.canvas
-        canvas.draw_idle()
+        self.canvases[self.tabs.select()].draw_idle()
         self.plots_dirty = False
         self.last_draw = monotonic()
 
@@ -179,6 +195,9 @@ class FlightPlotWindow:
                 self.set_altitude_limits(detail=detail)
                 self.figure.savefig(output, dpi=150, facecolor=self.figure.get_facecolor())
                 print(f'Plots saved: {output}', flush=True)
+            time_path = path.with_stem(path.stem + '_time')
+            self.time_figure.savefig(time_path, dpi=150)
+            print(f'Plots saved: {time_path}', flush=True)
             if self.track.has_ground_track:
                 track_path = path.with_stem(path.stem + '_trajectory')
                 self.track.figure.savefig(track_path, dpi=150)
@@ -208,11 +227,12 @@ class FlightPlotWindow:
                     points.append(last_sample)
                 # Final queued sample
                 break
-        deployment = self.deployment[:]
+        *deployment, deploy_time_s = self.deployment[:]
         altitude = deployment[0]
         new_deployment = not self.deployment_marked and isfinite(altitude)
         if points:
             update_plot(self.altitude_axes, points)
+            update_plot(self.time_axes, points, versus_time=True)
             batch_top_km = max(point['altitude_m'] for point in points) * .00105
             self.full_altitude_km = max(self.full_altitude_km, batch_top_km)
         if points or new_deployment:
@@ -220,7 +240,8 @@ class FlightPlotWindow:
             self.set_altitude_limits(detail=self.descent_detail.get())
             self.plots_dirty = True
         if new_deployment:
-            mark_deployment(self.altitude_axes, altitude)
+            mark_deployment(self.altitude_axes, altitude / 1000, 'km')
+            mark_deployment(self.time_axes, deploy_time_s, 's', versus_time=True)
             self.deployment_marked = True
             self.detail_control.state(['!disabled'])
         if action:
@@ -259,22 +280,37 @@ class TrajectoryPlot:
         self.path_3d, = self.space.plot([], [], [], color=ACCENT)
         self.path_2d, = self.ground.plot([], [], color=ACCENT)
         self.markers = []
-        for label, marker, color, size in (('Chute deployment', 'D', TRACE_COLORS[1], 9),
-                                           ('Touchdown', 'o', TRACE_COLORS[2], 5)):
-            marker_3d, = self.space.plot([], [], [], marker=marker, color=color, linestyle='none')
+        events = [('Chute deployment', 'D', TRACE_COLORS[1]),
+                  ('Touchdown', 'o', TRACE_COLORS[2])]
+        events.extend((label, marker, color) for _, label, marker, color in TRACK_PEAKS)
+        for label, marker, color in events:
+            marker_3d, = self.space.plot([], [], [], marker=marker, color=color,
+                                        markersize=4, linestyle='none')
             marker_2d, = self.ground.plot([], [], marker=marker, color=color, linestyle='none',
-                                          markersize=size, label=label)
+                                          markersize=4, label=label)
             self.markers.append((label, marker_3d, marker_2d))
-        self.legend = self.ground.legend(loc='upper left', facecolor=PANEL, edgecolor=BORDER,
+        self.legend = self.ground.legend(loc='lower right', facecolor=PANEL, edgecolor=BORDER,
                                          labelcolor=TEXT, framealpha=1)
         self.data = np.empty((0, len(TRACK_FIELDS)))
         self.touchdown = None
+        self.peaks = {}
 
     @property
     def has_ground_track(self):
         return len(self.data) > 0
 
     def update(self, samples, deployment):
+        # Retain peak positions before thinning the displayed trajectory.
+        for row in samples:
+            if not all(key in row and isfinite(row[key]) for key in TRACK_FIELDS):
+                continue
+            for key, _, _, _ in TRACK_PEAKS:
+                value = row.get(key)
+                if value is None or not isfinite(value):
+                    continue
+                strength = abs(value) if key == 'g_load' else value
+                if key not in self.peaks or strength > self.peaks[key][0]:
+                    self.peaks[key] = (strength, tuple(row[field] for field in TRACK_FIELDS))
         points = [tuple(row[key] for key in TRACK_FIELDS) for row in samples if 'longitude_deg' in row]
         if points:
             self.data = np.concatenate((self.data, points))
@@ -288,7 +324,9 @@ class TrajectoryPlot:
         east = np.unwrap(longitude, period=360)
         self.path_3d.set_data_3d(downrange / 1000, crossrange / 1000, altitude / 1000)
         self.path_2d.set_data(east, latitude)
-        events = (deployment, self.touchdown)
+        events = [deployment, self.touchdown]
+        events.extend(self.peaks[key][1] if key in self.peaks else None
+                      for key, _, _, _ in TRACK_PEAKS)
         for event, (label, marker_3d, marker_2d), text in zip(events, self.markers, self.legend.get_texts()):
             if event is not None and all(map(isfinite, event)):
                 h, along, across, lon, lat = event
@@ -311,18 +349,30 @@ class TrajectoryPlot:
                                  max(latitude[0] + .5, latitude.max()), auto=True)
 
 
-def create_altitude_panels(figure, grid):
+def create_flight_panels(figure, *, versus_time=False):
+    figure.subplots_adjust(left=.07, right=.97, bottom=.08, top=.94, wspace=.32, hspace=.46)
+    grid = figure.add_gridspec(3, 3)
     axes = []
-    for index, (title, xlabel, _, channels) in enumerate(PANELS):
-        ax = figure.add_subplot(grid[index // 3, index % 3], sharey=axes[0] if axes else None)
+    panels = TIME_PANELS if versus_time else ALTITUDE_PANELS
+    for index, (title, units, _, channels) in enumerate(panels):
+        shared = axes[0] if axes else None
+        ax = figure.add_subplot(grid[index // 3, index % 3],
+                                sharex=shared if versus_time else None,
+                                sharey=None if versus_time else shared)
         axes.append(ax)
         for trace_index, (_, label) in enumerate(channels):
             ax.plot([], [], label=label, color=TRACE_COLORS[trace_index], linewidth=1.6)
-        ax.set(title=title, xlabel=xlabel, ylim=(0, 1))
-        if index % 3 == 0:
-            ax.set_ylabel('Altitude (km)')
+        ax.set_title(title)
+        if versus_time:
+            ax.set(xlim=(0, 1), ylabel=units)
+            if index >= 6:
+                ax.set_xlabel('Simulated time (s)')
         else:
-            ax.tick_params(labelleft=False)
+            ax.set(xlabel=units, ylim=(0, 1))
+            if index % 3 == 0:
+                ax.set_ylabel('Altitude (km)')
+            else:
+                ax.tick_params(labelleft=False)
         ax.margins(x=.1)
         ax.grid(True, alpha=.55)
         if len(channels) > 1:
@@ -330,37 +380,46 @@ def create_altitude_panels(figure, grid):
     return axes
 
 
-def update_plot(axes, samples):
-    """Append flight telemetry to the 2D altitude plots."""
+def update_plot(axes, samples, *, versus_time=False):
+    """Append flight telemetry to the altitude or time panels."""
     max_points = 5000
-    new_altitude = np.asarray([row['altitude_m'] for row in samples], dtype=float) / 1000
-    for ax, (_, _, factor, channels) in zip(axes, PANELS):
+    if versus_time:
+        coordinate = np.asarray([row['time_s'] for row in samples], dtype=float)
+        axes[0].set_xlim(0, max(axes[0].get_xlim()[1], 1.05 * coordinate.max()))
+    else:
+        coordinate = np.asarray([row['altitude_m'] for row in samples], dtype=float) / 1000
+    panels = TIME_PANELS if versus_time else ALTITUDE_PANELS
+    for ax, (_, _, factor, channels) in zip(axes, panels):
         expand = False
-        left, right = ax.get_xlim()
+        lower, upper = ax.get_ylim() if versus_time else ax.get_xlim()
         for line, (key, _) in zip(ax.lines, channels):
             x, y = line.get_data()
-            new_x = np.asarray([row.get(key) for row in samples], dtype=float) * factor
+            values = np.asarray([row.get(key) for row in samples], dtype=float) * factor
+            new_x, new_y = (coordinate, values) if versus_time else (values, coordinate)
             x_data = np.concatenate((x, new_x))
-            y_data = np.concatenate((y, new_altitude))
+            y_data = np.concatenate((y, new_y))
             if len(x_data) > max_points:
                 indices = np.linspace(0, len(x_data) - 1, max_points // 2, dtype=int)
                 x_data, y_data = x_data[indices], y_data[indices]
             line.set_data(x_data, y_data)
-            finite = new_x[np.isfinite(new_x)]
-            if len(finite) and (not np.isfinite(x).any() or finite.min() < left or finite.max() > right):
+            finite = values[np.isfinite(values)]
+            previous = y if versus_time else x
+            if len(finite) and (not np.isfinite(previous).any() or finite.min() < lower or finite.max() > upper):
                 expand = True
         if expand:
             ax.relim()
-            ax.autoscale_view(scalex=True, scaley=False)
+            ax.autoscale_view(scalex=not versus_time, scaley=versus_time)
 
 
-def mark_deployment(axes, altitude_m):
-    """Mark the exact deployment altitude on the 2D flight plots."""
-    altitude_km = altitude_m / 1000
+def mark_deployment(axes, coordinate, units, *, versus_time=False):
+    """Mark the exact deployment position on each flight panel."""
     for ax in axes:
-        ax.axhline(altitude_km, color=ACCENT, linestyle=':', linewidth=1, alpha=.75)
+        draw_line = ax.axvline if versus_time else ax.axhline
+        draw_line(coordinate, color=ACCENT, linestyle=':', linewidth=1, alpha=.75)
     drag_axis = next(ax for ax in axes if ax.get_title() == 'Drag force')
-    drag_axis.annotate(f'Chute deploy · {altitude_km:.2f} km',
-                       xy=(.22, altitude_km), xycoords=drag_axis.get_yaxis_transform(),
-                       xytext=(0, 5), textcoords='offset points', ha='left',
+    xy = (.97, .92) if versus_time else (.22, coordinate)
+    transform = drag_axis.transAxes if versus_time else drag_axis.get_yaxis_transform()
+    drag_axis.annotate(f'Chute deploy · {coordinate:.2f} {units}',
+                       xy=xy, xycoords=transform, xytext=(0, 5),
+                       textcoords='offset points', ha='right' if versus_time else 'left',
                        va='bottom', color=ACCENT, fontsize=8)

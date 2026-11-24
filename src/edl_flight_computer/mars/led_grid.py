@@ -12,15 +12,14 @@ class TrajectoryLEDGrid:
         'entry_interface': (0, 170, 110), #teal
         'peak_acceleration': (255, 0, 0), #red
         'peak_heating': (255, 165, 0), #orange
-        'peak_velocity': (128, 0, 128), #purple
         'parachute_deploy': (0, 96, 255), #blue
-        'terminal_descent': (255, 230, 0), #yellow
+        'near_terminal_descent': (255, 230, 0), #yellow
         'heatshield_jettison': (255, 96, 96), #coral
         'backshell_separation': (0, 220, 255), #cyan
         'powered_descent_start': (255, 64, 180), #pink
     }
 
-    def __init__(self, sense, initial_altitude_m, time_span_s=720.0):
+    def __init__(self, sense, initial_altitude_m, time_span_s=360.0):
         self.sense = sense
         self.altitude_max_m = max(1.0, initial_altitude_m)
         self.time_span_s = max(1.0, time_span_s)

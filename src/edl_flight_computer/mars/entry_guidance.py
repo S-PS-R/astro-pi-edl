@@ -8,11 +8,15 @@ import numpy as np
 
 
 class EntryGuidance:
-    def __init__(self, latitude_deg, longitude_deg, max_bank_deg, heading_gain):
+    def __init__(self, latitude_deg, longitude_deg, max_bank_deg, heading_gain,
+                 range_bank_schedule=None):
         lat, lon = radians(latitude_deg), radians(longitude_deg)
         self.target = np.array((cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat)))
         self.max_bank_deg = max_bank_deg
         self.heading_gain = heading_gain
+        self.range_bank_schedule = range_bank_schedule
+        if range_bank_schedule is not None:
+            self.range_speeds, self.range_banks = map(np.array, zip(*range_bank_schedule))
 
     def command(self, up, ground_velocity):
         # Compare the ground track to the great-circle bearing, in the tangent plane.
@@ -20,7 +24,15 @@ class EntryGuidance:
         track = ground_velocity - np.dot(ground_velocity, up) * up
         right = np.dot(up, np.cross(desired, track))
         error_deg = degrees(atan2(right, np.dot(desired, track)))
-        return max(-self.max_bank_deg, min(self.max_bank_deg, self.heading_gain * error_deg))
+        heading_bank = max(-self.max_bank_deg, min(self.max_bank_deg, self.heading_gain * error_deg))
+        if self.range_bank_schedule is None:
+            return heading_bank
+
+        # Use the range-control profile at high speed, then hand over to heading alignment.
+        speed = np.linalg.norm(ground_velocity)
+        range_bank = np.interp(speed, self.range_speeds, self.range_banks)
+        range_weight = max(0.0, min(1.0, (speed - 1100.0) / 400.0))
+        return range_weight * range_bank + (1 - range_weight) * heading_bank
 
 
 class WindProfile:

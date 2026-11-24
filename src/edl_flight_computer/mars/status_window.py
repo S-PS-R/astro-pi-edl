@@ -97,12 +97,12 @@ class MissionWindow:
         emulator_root.geometry(f'+{x}+30')
         self.emulator = EmulatorGUI(emulator_root, sense)
 
-    def plot_deployment(self, before, after):
-        self.plotter.add_deployment(before, after)
+    def plot_deployment(self, time_s, before, after):
+        self.plotter.add_deployment(dict(before, time_s=time_s), dict(after, time_s=time_s))
 
     def publish(self, state, values):
         # Latest display snapshot
-        self.plotter.add_sample(values)
+        self.plotter.add_sample(dict(values, time_s=state.elapsed_s))
         self.latest = {
             'phase': state.phase.value.upper(),
             'elapsed_s': format_reading(state.elapsed_s),

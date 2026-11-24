@@ -34,6 +34,12 @@ def apply_tk_dark_theme(root):
                     troughcolor=PANEL, focuscolor=ACCENT)
     
     style.configure('TLabelframe.Label', background=BACKGROUND, foreground=MUTED)
+    style.configure('TNotebook', background=BACKGROUND, bordercolor=BORDER)
+    style.configure('TNotebook.Tab', background=PANEL, foreground=TEXT, padding=(12, 6))
+    style.map('TNotebook.Tab',
+              background=[('selected', ACCENT), ('active', BORDER)],
+              foreground=[('selected', BACKGROUND), ('active', TEXT)])
+
     style.configure('TButton', background=PANEL, padding=(8, 4))
     style.map('TButton', background=[('pressed', BORDER), ('active', BORDER)],foreground=[('disabled', MUTED)])
 

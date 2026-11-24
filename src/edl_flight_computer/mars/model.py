@@ -1,6 +1,7 @@
 """Atmosphere, flight equations, integration, and observed peak tracking."""
 
 from bisect import bisect_left
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import asin, atan2, ceil, cos, degrees, exp, hypot, pi, radians, sin, sqrt
 
@@ -11,12 +12,19 @@ from .entry_guidance import EntryGuidance, WindProfile
 from .powered_descent import PoweredDescent
 
 MAX_STEP_S = 0.02
+MIN_LANDING_WARNING_S = 10.0
+# Allow for the delay between a physics substep and the next display update.
+LANDING_WARNING_LEAD_S = 10.5
+
+
+class DeploymentWindowMissed(RuntimeError):
+    """The vehicle reached the altitude floor without a deployable canopy state."""
 
 # Mars constants
 MARS = {
     "name": "mars",
     "radius": 3389500.0, #m
-    "mu": 4.2828e13, #m³/s²
+    "mu": 3.711 * 3389500.0**2,  # Set surface gravity to the sizing workbook value.
     "rotation_rad_s": 2 * pi / (24.6229 * 3600),
     "T0": 214.0, #K
     "P0": 636.0, #Pa
@@ -47,8 +55,26 @@ def parachute_drag_coefficient(mach, curve):
     fraction = (mach - lower_mach) / (upper_mach - lower_mach)
     return lower_cd + fraction * (upper_cd - lower_cd)
 
+def sphere_cone_areas(diameter_m, half_angle_deg, nose_radius_m, shoulder_radius_m):
+    """Return the aerodynamic reference area and approximate TPS area in m²."""
+    radius = diameter_m / 2
+    angle = radians(half_angle_deg)
+    shoulder_center = radius - shoulder_radius_m
 
-def calculate_state(X, planet, vehicle_params, *, parachute=None, canopy_deployed=False):
+    # The spherical cap and shoulder are tangent to the conical section.
+    nose_join = nose_radius_m * cos(angle)
+    shoulder_join = shoulder_center + shoulder_radius_m * cos(angle)
+    cap_area = 2 * pi * nose_radius_m**2 * (1 - sin(angle))
+    cone_area = pi * (shoulder_join**2 - nose_join**2) / sin(angle)
+    # Revolve the shoulder arc from the cone join to the maximum diameter.
+    shoulder_area = 2 * pi * shoulder_radius_m * (
+        shoulder_center * angle + shoulder_radius_m * sin(angle)
+    )
+    return pi * radius**2, cap_area + cone_area + shoulder_area
+
+
+
+def calculate_state(X, planet, vehicle_params, *, parachute: dict | None = None, canopy_deployed=False):
     """Calculate state derivatives, including downrange when supplied in X."""
     h, V, gamma = X[:3]
     T, pressure, rho, _, _ = ambient_atmosphere(h, planet)
@@ -71,7 +97,8 @@ def calculate_state(X, planet, vehicle_params, *, parachute=None, canopy_deploye
     effective_cl = CL  # Fixed lift-up entry
     equilibrium_speed = None
     if canopy_deployed:
-        # ASTE 577 Lecture 6, PDF p. 47: sum the vehicle and canopy drag areas.
+        if parachute is None:
+            raise ValueError('A deployed canopy requires parachute settings')
         canopy_area = pi * parachute['diameter_m']**2 / 4
         parachute_cd = parachute_drag_coefficient(mach, parachute['drag_curve'])
         parachute_drag_area = canopy_area * parachute_cd
@@ -88,9 +115,7 @@ def calculate_state(X, planet, vehicle_params, *, parachute=None, canopy_deploye
     # Flight equations
     h_dot = V * sin_gamma
     V_dot = -total_drag / m - g * sin_gamma
-    gamma_dot = 0.0
-    if V > 0.0:
-        gamma_dot = L / (m * V) + (V / (Rp + h) - g / V) * cos_gamma
+    gamma_dot = L / (m * V) + (V / (Rp + h) - g / V) * cos_gamma
     vertical_acceleration = V_dot * sin_gamma + V * cos_gamma * gamma_dot
 
     # Convective heating
@@ -123,6 +148,7 @@ def calculate_state(X, planet, vehicle_params, *, parachute=None, canopy_deploye
         'vehicle_drag_n': vehicle_drag,
         'parachute_drag_n': parachute_drag,
         'total_drag_n': total_drag,
+        'lift_n': L,
     }
     derivatives = [h_dot, V_dot, gamma_dot]
     if len(X) == 4:
@@ -153,13 +179,15 @@ class SpatialFlight:
         return np.array((*position, vx + self.omega * y, vy - self.omega * x, vz))
 
     def calculate(self, vector, planet, vehicle, parachute, canopy_deployed, *,
-                  landing=None, phase=None, guidance=None, wind=None, time_s=0.0):
+                  landing: PoweredDescent | None = None, phase: Phase | None = None,
+                  guidance: EntryGuidance | None = None, wind: WindProfile | None = None, time_s=0.0):
         x, y, z, vx, vy, vz = vector[:6]
         radius = hypot(x, y, z)
         radial = (x / radius, y / radius, z / radius)
-        flat = landing is not None and landing.up is not None
-        ux, uy, uz = landing.up if flat else radial
-        altitude = landing.altitude(vector[:3]) if flat else radius - self.radius
+        landing_up = landing.up if landing is not None else None
+        flat = landing_up is not None
+        ux, uy, uz = landing_up if landing_up is not None else radial
+        altitude = landing.altitude(vector[:3]) if landing is not None and flat else radius - self.radius
         speed = hypot(vx, vy, vz)
         vertical_speed = vx * ux + vy * uy + vz * uz
         horizontal_speed = hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
@@ -187,12 +215,13 @@ class SpatialFlight:
         ax = -gravity * ux + 2 * omega * vy + omega**2 * x
         ay = -gravity * uy - 2 * omega * vx + omega**2 * y
         az = -gravity * uz
-        if flat:
-            ax, ay, az = -gravity * landing.up
+        if landing_up is not None:
+            ax, ay, az = -gravity * landing_up
         mass = vehicle['mass']
         bank_deg = self.bank_deg
         if guidance is not None and phase is Phase.ENTRY and horizontal_speed > 0:
             bank_deg = guidance.command(np.asarray(radial), vector[3:6])
+        lift_n = 0.0
         if air_speed > 0:
             along_path = (ax * avx + ay * avy + az * avz) / air_speed
             if values['equilibrium_speed_m_s'] is not None:
@@ -204,7 +233,8 @@ class SpatialFlight:
             ax, ay, az = ax - drag * avx, ay - drag * avy, az - drag * avz
             if air_horizontal > air_speed * 1e-12 and not canopy_deployed and not flat:
                 # v × (up × v) is lift-up. Positive bank tilts lift to the right.
-                lift = values['dynamic_pressure_pa'] * vehicle['S'] * values['effective_cl'] / mass
+                lift_n = values['lift_n']
+                lift = lift_n / mass
                 bank = radians(bank_deg)
                 up_scale = lift * cos(bank) / (air_speed * air_horizontal)
                 right_scale = -lift * sin(bank) / air_horizontal
@@ -213,7 +243,7 @@ class SpatialFlight:
                 az += up_scale * (avx * ly - avy * lx) + right_scale * lz
 
         fuel_flow = thrust_n = 0.0
-        if flat:
+        if landing is not None and flat:
             force, fuel_flow = landing.thrust(phase, altitude, vector[:3], vector[3:6], (ax, ay, az), mass, vector[6],
                                               hold_horizontal=wind is not None)
             thrust_n = np.linalg.norm(force)
@@ -225,6 +255,7 @@ class SpatialFlight:
             crossrange_m=self.radius * asin(max(-1.0, min(1.0, np.dot(radial, self.left)))),
             bank_angle_deg=None if (canopy_deployed or flat) else bank_deg,
             ground_speed_m_s=speed, wind_east_m_s=wind_east, wind_north_m_s=wind_north,
+            lift_n=lift_n,
             vertical_velocity_m_s=vertical_speed,
             vertical_acceleration_m_s2=ax * ux + ay * uy + az * uz + (0 if flat else horizontal_speed**2 / radius),
             acceleration_m_s2=speed_dot, g_load=speed_dot / gravity,
@@ -240,7 +271,7 @@ class SpatialFlight:
 
 
 def advance_state(X, dt, planet, vehicle_params, max_step=MAX_STEP_S, *,
-                  parachute=None, canopy_deployed=False):
+                  parachute: dict | None = None, canopy_deployed=False):
     """Integrate elapsed time with bounded Euler steps; stop at surface contact."""
     X = np.array(X, dtype=float, copy=True)
     if dt <= 0 or X[0] <= 0:
@@ -289,7 +320,7 @@ class MarsTrajectory:
             self.vector = np.array((*vector, 0.0) if len(vector) == 3 else vector, dtype=float)
         self.planet = planet
         self.vehicle_params = vehicle_params
-        self.landing = None
+        self.landing: PoweredDescent | None = None
         if powered_landing is not None:
             if self.spatial is None or parachute is None:
                 raise ValueError('Powered landing requires an entry site and a parachute')
@@ -304,13 +335,14 @@ class MarsTrajectory:
             self.vector = np.append(self.vector, propellant)
             self.dry_attached_mass = vehicle_params['mass'] - propellant
         self.parachute = parachute
+        self.deployment_armed = False
         self.phase = phase
         self.canopy_deployed = phase in (Phase.PARACHUTE_DESCENT, Phase.TERMINAL_DESCENT,
                                          Phase.HEATSHIELD_JETTISONED)
         if self.landing is not None and self.canopy_deployed:
             self.landing.chute_time_s = 0.0
         self.time_s = 0.0
-        self.terminal_since_s = None
+        self.terminal_since_s: float | None = None
         self.terminal_reported = phase is Phase.TERMINAL_DESCENT
         self.landing_warned = False
         self.values = self._calculate(self.vector)[1]
@@ -343,7 +375,7 @@ class MarsTrajectory:
             vector += (duration - burn_s) * self._calculate(vector, self.time_s + burn_s)[0]
         return vector, self._calculate(vector, self.time_s + duration)[1]
 
-    def _first_crossing(self, duration, endpoint, condition):
+    def _first_crossing(self, duration, endpoint, condition) -> tuple[float, tuple[np.ndarray, dict]]:
         """Locate a false-to-true crossing bracketed by the current state and endpoint."""
         low = 0.0
         while duration - low > 1e-6:
@@ -355,29 +387,30 @@ class MarsTrajectory:
                 low = midpoint
         return duration, endpoint
 
-    def _deploy_conditions(self, values):
-        return (
-            values['mach'] <= self.parachute['max_deploy_mach'],
-            values['dynamic_pressure_pa'] <= self.parachute['max_deploy_dynamic_pressure_pa'],
-            values['altitude_m'] >= self.parachute['min_deploy_altitude_m'],
-            values['vertical_velocity_m_s'] < 0,
-        )
+    def _find_deployment(self, duration, endpoint) -> tuple[float, tuple[np.ndarray, dict]] | None:
+        def due(values):
+            if 'deploy_altitude_m' in self.parachute:
+                return values['altitude_m'] <= self.parachute['deploy_altitude_m']
+            if 'deploy_mach' in self.parachute:
+                return values['mach'] <= self.parachute['deploy_mach']
+            return (self.deployment_armed
+                    and values['dynamic_pressure_pa'] <= self.parachute['max_deploy_dynamic_pressure_pa']
+                    and values['vertical_velocity_m_s'] < 0)
 
-    def _find_deployment(self, duration, endpoint):
-        before = self._deploy_conditions(self.values)
-        if all(before):
+        pressure_window = not any(key in self.parachute for key in ('deploy_altitude_m', 'deploy_mach'))
+        if pressure_window:
+            limit = self.parachute['max_deploy_dynamic_pressure_pa']
+            self.deployment_armed |= self.values['dynamic_pressure_pa'] > limit
+        floor = self.parachute.get('min_deploy_altitude_m', 0) if pressure_window else 0
+        if self.values['altitude_m'] < floor:
+            raise DeploymentWindowMissed('Parachute deployment window missed below minimum altitude')
+        if due(self.values):
             return 0.0, (self.vector, self.values)
-        after = self._deploy_conditions(endpoint[1])
-        candidates = []
-        for index, (was_eligible, is_eligible) in enumerate(zip(before, after)):
-            if not was_eligible and is_eligible:
-                # Locate each opening boundary so a closing boundary in the same
-                # substep cannot hide a brief overlap of the deployment conditions.
-                time, sample = self._first_crossing(
-                    duration, endpoint, lambda values: self._deploy_conditions(values)[index])
-                if sample[1]['altitude_m'] > 0 and all(self._deploy_conditions(sample[1])):
-                    candidates.append((time, sample))
-        return min(candidates, key=lambda crossing: crossing[0], default=None)
+        if due(endpoint[1]):
+            crossing = self._first_crossing(duration, endpoint, due)
+            if crossing[1][1]['altitude_m'] < floor:
+                raise DeploymentWindowMissed('Parachute deployment window missed below minimum altitude')
+            return crossing
 
     def _terminal_eligible(self, values):
         equilibrium_speed = values['equilibrium_speed_m_s']
@@ -411,56 +444,70 @@ class MarsTrajectory:
                 self.terminal_reported = True
                 if self.landing is None:
                     self.phase = Phase.TERMINAL_DESCENT
-                events.append(FlightEvent('terminal_descent', deadline, values))
+                events.append(FlightEvent('near_terminal_descent', deadline, values))
         if not eligible_at_end:
             self.terminal_since_s = None
 
-    @staticmethod
-    def _landing_warning_due(values):
-        downward_speed = -values['vertical_velocity_m_s']
-        return downward_speed > 0 and values['altitude_m'] <= 10.0 * downward_speed
-
     def _record_landing_warning(self, duration, endpoint, events):
-        if self.phase is not Phase.VERTICAL_DESCENT or self.landing_warned:
+        if (self.landing is None or self.landing_warned
+                or self.phase not in (Phase.POWERED_DESCENT, Phase.VERTICAL_DESCENT)):
             return
-        if self._landing_warning_due(self.values):
+        touchdown_speed = self.landing.settings['propulsion']['target_descent_speed_m_s']
+
+        def time_to_contact(values):
+            downward_speed = -values['vertical_velocity_m_s']
+            if downward_speed <= 0:
+                return float('inf')
+            # Estimate using the average speed under constant braking to the touchdown speed.
+            return 2 * values['altitude_m'] / (downward_speed + touchdown_speed)
+
+        def warning_due(values):
+            return time_to_contact(values) <= LANDING_WARNING_LEAD_S
+
+        if warning_due(self.values):
             time, values = 0.0, self.values
-        elif self._landing_warning_due(endpoint[1]):
-            time, (_, values) = self._first_crossing(duration, endpoint, self._landing_warning_due)
+        elif warning_due(endpoint[1]):
+            time, (_, values) = self._first_crossing(duration, endpoint, warning_due)
         else:
             return
-        if values['altitude_m'] > 0:
+        estimate = time_to_contact(values)
+        if estimate >= MIN_LANDING_WARNING_S:
             self.landing_warned = True
-            events.append(FlightEvent('landing_warning', self.time_s + time, values))
+            events.append(FlightEvent('landing_warning', self.time_s + time,
+                                      dict(values, estimated_time_to_contact_s=estimate)))
 
-    def _staging_transition(self, duration, endpoint):
+    def _staging_transition(self, duration, endpoint) -> tuple[str | None, Phase, float, tuple[np.ndarray, dict]] | None:
         """Return the first applicable staging event and its integration boundary."""
         if self.landing is None:
             return None
-        settings = self.landing.settings
+        landing = self.landing
+        settings = landing.settings
         delay = None
+        due: Callable[[dict], bool] | None = None
         if self.phase in (Phase.PARACHUTE_DESCENT, Phase.TERMINAL_DESCENT):
             name, phase = 'heatshield_jettison', Phase.HEATSHIELD_JETTISONED
-            delay = self.landing.chute_time_s + settings['heatshield']['delay_after_chute_s'] - self.time_s
+            assert landing.chute_time_s is not None
+            delay = landing.chute_time_s + settings['heatshield']['delay_after_chute_s'] - self.time_s
         elif self.phase is Phase.HEATSHIELD_JETTISONED:
             name, phase = 'backshell_separation', Phase.BACKSHELL_SEPARATED
             s = settings['backshell']
 
-            def due(values):
-                return (values['altitude_m'] <= s['separation_altitude_m']
-                        and values['ground_speed_m_s'] <= s['max_separation_speed_m_s']
-                        and values['vertical_velocity_m_s'] < 0)
+            def separation_due(values):
+                return values['altitude_m'] <= s['separation_altitude_m']
+            due = separation_due
         elif self.phase is Phase.BACKSHELL_SEPARATED:
             name, phase = 'powered_descent_start', Phase.POWERED_DESCENT
-            delay = self.landing.separation_time_s + settings['propulsion']['ignition_delay_s'] - self.time_s
+            assert landing.separation_time_s is not None
+            delay = landing.separation_time_s + settings['propulsion']['ignition_delay_s'] - self.time_s
         elif self.phase is Phase.POWERED_DESCENT:
-            name, phase = 'vertical_descent_start', Phase.VERTICAL_DESCENT
+            name, phase = None, Phase.VERTICAL_DESCENT
 
-            def due(values):
-                target = self.landing.target
+            def capture_due(values):
+                target = landing.target
                 aligned = (target is None or values['landing_target_error_m'] <= target['tolerance_m']
                            or values['altitude_m'] <= target['stop_divert_altitude_m'])
                 return aligned and values['horizontal_speed_m_s'] <= settings['propulsion']['horizontal_capture_m_s']
+            due = capture_due
         else:
             return None
 
@@ -469,12 +516,14 @@ class MarsTrajectory:
                 return None
             time = max(0.0, delay)
             sample = self._sample(time)
-        elif due(self.values):
-            time, sample = 0.0, (self.vector, self.values)
-        elif due(endpoint[1]):
-            time, sample = self._first_crossing(duration, endpoint, due)
         else:
-            return None
+            assert due is not None
+            if due(self.values):
+                time, sample = 0.0, (self.vector, self.values)
+            elif due(endpoint[1]):
+                time, sample = self._first_crossing(duration, endpoint, due)
+            else:
+                return None
         if sample[1]['altitude_m'] > 0:
             return name, phase, time, sample
 
@@ -485,12 +534,14 @@ class MarsTrajectory:
             if self.landing is not None:
                 self.landing.chute_time_s = self.time_s
         elif phase is Phase.HEATSHIELD_JETTISONED:
+            assert self.landing is not None
             shield = self.landing.settings['heatshield']
             self.dry_attached_mass -= shield['mass_kg']
             self.vehicle_params = dict(self.vehicle_params, mass=self.vehicle_params['mass'] - shield['mass_kg'],
                                        CD=shield['cd'], S=shield['area_m2'])
             self.terminal_since_s = None
         elif phase is Phase.BACKSHELL_SEPARATED:
+            assert self.landing is not None
             shell = self.landing.settings['backshell']
             self.landing.separate(self.vector[:3], self.time_s)
             self.dry_attached_mass -= shell['mass_kg']
@@ -545,8 +596,17 @@ class MarsTrajectory:
 
             if transition is not None:
                 before_values = self.values
+                name, phase = transition[:2]
                 self._apply_transition(phase)
-                events.append(FlightEvent(name, self.time_s, self.values, before_values, phase))
+                if name is None:
+                    continue
+                event_values = self.values
+                if phase is Phase.PARACHUTE_DESCENT:
+                    # Estimate opening shock for the event while integrating steady canopy drag.
+                    opening_factor = self.parachute.get('opening_factor', 1.0)
+                    event_values = dict(self.values, opening_factor=opening_factor,
+                                        opening_load_n=opening_factor * self.values['parachute_drag_n'])
+                events.append(FlightEvent(name, self.time_s, event_values, before_values, phase))
             elif self.values['altitude_m'] <= 0:
                 self.phase = self._contact_phase()
 
@@ -558,7 +618,6 @@ class PeakTracker:
     CHANNELS = {
         'peak_acceleration': ('acceleration_m_s2', 'm/s^2'),
         'peak_heating': ('heating_kw_m2', 'kW/m^2'),
-        'peak_velocity': ('velocity_m_s', 'm/s'),
     }
 
     def __init__(self):
@@ -586,6 +645,7 @@ class PeakTracker:
                 # New peak
                 self.peaks[name] = dict(value=value, units=units, time_s=mission_time_s,
                                         altitude_m=flight_values['altitude_m'],
+                                        velocity_m_s=flight_values['velocity_m_s'],
                                         confirmed=False)
                 if braking:
                     self.peaks[name]['phase'] = Phase.ENTRY.value
