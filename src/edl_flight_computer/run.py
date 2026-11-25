@@ -13,7 +13,8 @@ GROUND_STATION = {
     'enabled': True,
     # Laptop's Wi-Fi IPv4 address when running on the Pi.
     # 127.0.0.1 sends to a ground station on this same computer (desktop simulation).
-    'host': '127.0.0.1',
+    # 10.0.0.88 sends to a ground station on the laptop (Pi flight) 
+    'host': '10.0.0.88',
     'port': 8765,
 }
 
