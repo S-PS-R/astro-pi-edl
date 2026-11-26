@@ -118,9 +118,13 @@ The terminal prints events as they arrive, with a landing banner, and a
 once-per-second status line showing key telemetry, packet loss, and `NO SIGNAL`
 after two silent seconds. A plot window (`shared/live_plot.py`) shows the
 telemetry: Earth sensor panels for drops, and altitude, speed, heat flux, load
-factor, and board pressure/temperature for Mars. A new run clears the plots.
-Received packets are appended to `logs/ground_<timestamp>.jsonl`. Options:
-`--no-plot` for console only, `--log PATH`, `--no-log`.
+factor, and board pressure/temperature for Mars. The laptop saves a PNG when it
+receives a run-ending event, switches to another run, or closes the plot window.
+The PNG shows the telemetry retained in the live plot. It is saved next to the
+packet log as `ground_<timestamp>_plot_<number>_<run>.png` by default.
+Received packets are appended to `logs/ground_<timestamp>.jsonl`.
+`--log PATH` sets the location and filename prefix for both outputs.
+`--no-log` disables the packet log. `--no-plot` runs without a plot window or PNGs.
 
 ## Fault detection
 

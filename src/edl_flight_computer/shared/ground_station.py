@@ -2,18 +2,21 @@
 
 Receives the UDP downlink from Earth drops (Pi) or the Mars simulator, prints
 critical events as they arrive, shows a once-per-second telemetry status line,
-plots telemetry live (unless --no-plot), and records every received packet to
-logs/ground_<timestamp>.jsonl.
+plots telemetry live (unless --no-plot), and saves packet logs and plot PNGs
+on the ground station.
 """
 
 import argparse
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 import socket
 from time import monotonic, sleep
 
 from .downlink import DEFAULT_PORT, PROTOCOL_VERSION
+
+RUN_END_EVENTS = {'landing', 'impact', 'stopped', 'deployment_failed'}
 
 # Status line fields: (telemetry key, label, format)
 STATUS_FIELDS = {
@@ -42,6 +45,7 @@ class RunLink:
         self.event_ids = set()
         self.latest = None
         self.last_heard = None
+        self.finished = False
 
     @property
     def lost(self):
@@ -112,6 +116,8 @@ class GroundStation:
             if packet.get('event_id') in link.event_ids:
                 return None
             link.event_ids.add(packet.get('event_id'))
+            if packet.get('event') in RUN_END_EVENTS:
+                link.finished = True
             self.show_event(packet)
         else:
             if link.latest is not None and seq <= link.latest['seq']:
@@ -174,20 +180,49 @@ def main(argv=None):
     parser.add_argument('--no-plot', action='store_true', help='console only, no plot window')
     args = parser.parse_args(argv)
 
-    log_path = None if args.no_log else (args.log or default_log_path())
+    session_path = args.log or default_log_path()
+    log_path = None if args.no_log else session_path
     station = GroundStation(args.port, log_path)
     print(f'Ground station listening on UDP {args.port}. '
           'Allow Python through the laptop firewall on your private Wi-Fi network.', flush=True)
     if log_path is not None:
         print(f'Recording packets: {log_path}', flush=True)
     next_status = 0.0
+    plot = None
+    plotted_run = 0
+    saved_history = None
+    saved_snapshot = None
 
-    def service(plot=None):
+    def save_plot():
+        nonlocal plotted_run, saved_history, saved_snapshot
+        if plot is None or not plot.axes:
+            return
+        history = plot.history
+        if history.latest is None or history.latest is saved_snapshot:
+            return
+        if history is not saved_history:
+            plotted_run += 1
+            saved_history = history
+        saved_snapshot = history.latest
+        run_name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(plot.run))[:80]
+        path = session_path.with_name(f'{session_path.stem}_plot_{plotted_run:02d}_{run_name}.png')
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            plot.draw()
+            plot.figure.savefig(path, dpi=150)
+        except OSError as error:
+            print(f'Could not save downlink plot: {error}', flush=True)
+        else:
+            print(f'Saved downlink plot: {path}', flush=True)
+
+    def service():
         # Receive, then report status once per second
         nonlocal next_status
         for packet in station.poll():
             if plot is not None:
-                plot.add(packet)
+                plot.add(packet, before_reset=save_plot)
+        if plot is not None and plot.run in station.runs and station.runs[plot.run].finished:
+            save_plot()
         now = monotonic()
         if now >= next_status:
             print(station.status_line(), flush=True)
@@ -206,7 +241,7 @@ def main(argv=None):
             plot = TelemetryPlot(args.port)
 
             def refresh(_frame):
-                service(plot)
+                service()
                 plot.draw()
 
             animation = FuncAnimation(plot.figure, refresh, interval=50, cache_frame_data=False)
@@ -215,6 +250,7 @@ def main(argv=None):
         pass
     finally:
         station.close()
+        save_plot()
         print('Ground station stopped.')
     return 0
 

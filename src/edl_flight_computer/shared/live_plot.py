@@ -95,13 +95,15 @@ class TelemetryPlot:
                 self.axes.append((axis, traces))
         self.mission = mission
 
-    def add(self, packet):
+    def add(self, packet, *, before_reset=None):
         """Add one telemetry packet; a new run clears the history."""
         try:
             run, mission, time_s, data = packet['run'], packet['mission'], float(packet['time_s']), packet['data']
         except (KeyError, TypeError, ValueError):
             return
         if run != self.run:
+            if before_reset is not None:
+                before_reset()
             self.run = run
             self.history = SnapshotBuffer()
             if mission != self.mission:
