@@ -16,11 +16,6 @@ dist/
 # Folders
 .tmp
 .pdfs
-logs/
-
-# Logs
-src/logs/
-
 
 # emulator
 *.egg-info/
