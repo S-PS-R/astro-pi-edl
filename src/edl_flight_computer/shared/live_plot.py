@@ -16,6 +16,8 @@ PANELS = {
         ('Pressure (hPa)', ('pressure',)),
         ('Temperature (°C)', ('temperature_pressure', 'temperature_humidity')),
         ('Humidity (%)', ('humidity',)),
+        ('EKF displacement from release (m)', ('ekf_displacement_m',)),
+        ('EKF vertical velocity (m/s)', ('ekf_vertical_velocity_m_s',)),
     ),
     'mars': (
         ('Altitude (m)', ('altitude_m',)),
@@ -36,7 +38,9 @@ def sensor_group(name):
         return 'mag'
     if name in ('pressure', 'temperature_pressure'):
         return 'pressure'
-    return 'humidity'
+    if name in ('humidity', 'temperature_humidity'):
+        return 'humidity'
+    return None
 
 
 class SnapshotBuffer:
@@ -82,9 +86,11 @@ class TelemetryPlot:
         self.figure.clear()
         self.axes = []
         panels = PANELS.get(mission, ())
+        columns = 2
+        rows = (len(panels) + columns - 1) // columns
         with rc_context(DARK_PLOT_STYLE):
             for index, (title, channels) in enumerate(panels):
-                axis = self.figure.add_subplot(3, 2, index + 1)
+                axis = self.figure.add_subplot(rows, columns, index + 1)
                 axis.set_title(title)
                 axis.set_xlabel(TIME_LABELS.get(mission, 'Time (s)'))
                 axis.grid(alpha=0.5)
@@ -111,7 +117,9 @@ class TelemetryPlot:
         self.dirty |= self.history.ingest(time_s, data)
 
     def draw(self):
-        if not self.dirty:
+        latest_sample = self.history.latest
+        mission = self.mission
+        if not self.dirty or latest_sample is None or mission is None:
             return
         self.dirty = False
         rows = list(self.history.rows)
@@ -119,25 +127,27 @@ class TelemetryPlot:
         nan = float('nan')
         for axis, traces in self.axes:
             for name, line in traces:
-                status_key = sensor_group(name) + '_status'
+                group = sensor_group(name)
+                status_key = f'{group}_status' if group is not None else None
                 values = []
                 for _, row in rows:
-                    value = None if row is None else row.get(name)
                     # Earth snapshots flag failed sensor groups
-                    if value is None or row.get(status_key, 'ok') != 'ok':
-                        value = nan
-                    values.append(value)
+                    if row is None or (status_key is not None and row.get(status_key, 'ok') != 'ok'):
+                        values.append(nan)
+                        continue
+                    value = row.get(name)
+                    values.append(nan if value is None else value)
                 line.set_data(times, values)
             axis.relim()
             axis.autoscale_view()
 
         # Title
-        time_s, latest = self.history.latest
+        time_s, latest = latest_sample
         phase = latest.get('phase', '?')
-        if self.mission == 'earth':
+        if mission == 'earth':
             flight = latest.get('flight_elapsed_s')
             detail = 'waiting for release' if flight is None else f'flight {flight:.2f} s'
         else:
             detail = f'T+{time_s:.1f} s'
-        self.figure.suptitle(f'{self.mission.upper()} — {self.run} — {phase} — {detail}',
+        self.figure.suptitle(f'{mission.upper()} — {self.run} — {phase} — {detail}',
                             color=DARK_PLOT_STYLE['text.color'])

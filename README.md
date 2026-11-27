@@ -117,12 +117,18 @@ python -m edl_flight_computer.shared.ground_station --port 8765
 The terminal prints events as they arrive, with a landing banner, and a
 once-per-second status line showing key telemetry, packet loss, and `NO SIGNAL`
 after two silent seconds. A plot window (`shared/live_plot.py`) shows the
-telemetry: Earth sensor panels for drops, and altitude, speed, heat flux, load
-factor, and board pressure/temperature for Mars. The laptop saves a PNG when it
+telemetry: Earth sensor and vertical EKF panels for drops, and altitude, speed,
+heat flux, load factor, and board pressure/temperature for Mars. The laptop saves a PNG when it
 receives a run-ending event, switches to another run, or closes the plot window.
 The PNG shows the telemetry retained in the live plot. It is saved next to the
 packet log as `ground_<timestamp>_plot_<number>_<run>.png` by default.
-Received packets are appended to `logs/ground_<timestamp>.jsonl`.
+The ground station appends events and telemetry to `logs/ground_<timestamp>.jsonl`.
+The Earth log stores the slim telemetry snapshot at up to 10 Hz, plus the final
+received sample and one record per event. Snapshots include phase, sensors,
+EKF displacement and velocity with uncertainty, IMU magnitudes, and active faults.
+The landing event carries the elapsed time from release through confirmation.
+Thinning creates sequence gaps in the Earth JSONL; the live link-loss display
+uses the incoming packets before thinning.
 `--log PATH` sets the location and filename prefix for both outputs.
 `--no-log` disables the packet log. `--no-plot` runs without a plot window or PNGs.
 
@@ -351,8 +357,8 @@ CSV schedule when necessary.
 Sensor groups retain their configured nominal rates (IMU 119 Hz, pressure 25 Hz,
 magnetometer 20 Hz, humidity 12.5 Hz). Slower readings repeat between updates.
 EKF updates use actual elapsed time between fresh IMU polls. Poll timestamps,
-freshness/status flags, timing diagnostics, and the release timer remain internal
-and in laptop snapshots; they are omitted from the normal CSV.
+freshness/status flags, timing diagnostics, and the release timer are available
+in live laptop snapshots. The Earth CSV and JSONL omit those diagnostics.
 
 Each Earth run creates `logs/drop_<timestamp>/drop_<timestamp>.csv`. The desktop
 emulator saves `final_emulator.png` in the same folder. CSV columns are ordered
@@ -383,7 +389,7 @@ A `landing` event is sent to the ground station at confirmation.
 
 ### Earth EKF estimates
 
-`EarthLandingEKF` in `earth/ekf.py` estimates vertical displacement from release,
+`EKF` in `earth/ekf.py` estimates vertical displacement from release,
 upward vertical velocity (negative during descent), and vertical accelerometer
 bias. Position and speed start at zero; no drop height is configured. A negative
 displacement means the Pi has moved below its starting point, rather than its
@@ -393,20 +399,24 @@ accelerometer axes onto vertical before removing gravity.
 
 Fresh IMU polls drive prediction with their actual elapsed time. Fresh pressure
 polls provide nonlinear barometric corrections relative to pre-release pressure.
+The vented-drop pressure model uses 2 Pa nominal measurement noise based on
+stationary portions of the recorded drops. During descent the estimate assumes
+one-way downward motion, so displacement can decrease or hold. The curve can be
+nonlinear as the payload accelerates and slows.
 Set `EARTH_SETTINGS['ekf_use_pressure'] = False` for a sealed box: trapped pressure is not an
 ambient altitude measurement. With pressure disabled, in-flight estimates drift
 as IMU errors accumulate. Sensor gaps coast with increased uncertainty rather
 than integrating stale accelerations.
 
-`ekf_displacement_m`, `ekf_vertical_velocity_m_s`, `ekf_accel_bias_m_s2`, displacement and
-velocity standard deviations are included in every CSV row and laptop snapshot.
-Update/gap flags remain in laptop snapshots. Estimates remain blank until calibration completes
-and hold between new sensor observations. The laptop's six panels still display
-raw sensors. EKF estimates never stop recording or confirm landing; the
-five-second IMU detector does that independently and then supplies a zero-speed
-constraint. The estimated displacement remains relative to release. Mars uses
-its flight equations directly and has no EKF. Physical accuracy needs validation
-against the packaged Pi.
+`ekf_displacement_m`, `ekf_vertical_velocity_m_s`, `ekf_accel_bias_m_s2`, and the
+displacement and velocity standard deviations are included in every CSV row and
+live laptop snapshot. Estimates begin after calibration. Once the IMU detector
+starts its settling timer, the EKF holds position and uses repeated zero-velocity
+observations with a nominal 0.03 m/s standard deviation. The resulting velocity
+estimate approaches zero. If motion resumes, inertial prediction resumes from the
+held state. The detector confirms landing after five continuous seconds of quiet
+IMU readings, and the log retains the EKF's estimate at that time. Displacement and
+velocity accuracy require comparison with an independent reference.
 
 ## Real-time plots on a laptop
 
@@ -423,9 +433,17 @@ and keep `port = 8765` (or match the receiver's port). See
 [Ground station downlink](#ground-station-downlink).
 
 The laptop plots acceleration, gyro, magnetometer, pressure, both temperatures,
-and humidity, plus phase and flight time, and prints downlinked events in its
-terminal. Plot snapshots are sent at 20 Hz; the
-Pi's full-rate CSV remains independent. The plots retain the most recent 16,000
+humidity, EKF displacement, and EKF vertical velocity. The plot title shows phase
+and flight time, and the terminal prints downlinked events. Plot snapshots are
+sent at 20 Hz. To copy the Pi's full-rate CSV after a drop, run this on the laptop
+with SSH enabled on the Pi. Replace `PI_USER`, `PI_HOST`, and `DROP_RUN` with your
+login, Pi hostname or IP address, and run folder name. Adjust the repo path if needed.
+
+```sh
+scp PI_USER@PI_HOST:~/Projects/astro-pi-edl/logs/DROP_RUN/DROP_RUN.csv .
+```
+
+The plots retain the most recent 16,000
 snapshots (over 13 minutes at 20 Hz) and break the line where snapshots are missing. Packet loss or closing the laptop
 does not stop Pi recording. All rendering happens on the laptop; the Pi creates
 no mission plots or PNGs. Real-hardware Earth runs remain headless; emulator

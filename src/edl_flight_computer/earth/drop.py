@@ -231,24 +231,28 @@ def run_live_drop(sense, output_path, downlink=None, settings=None, stop_request
 
                     # Fresh measurement updates
                     if estimator is not None:
+                        previous_displacement_m = estimator.displacement_m
+                        settling = detector.settling_at is not None
                         if valid and fresh:
                             dt = elapsed - last_estimate_at
                             gap = dt > detector.settings['max_imu_gap_s']
                             accel = [readings['accel_' + axis] for axis in 'xyz']
-                            gyro = [readings['gyro_' + axis] for axis in 'xyz']
-                            estimator.predict(dt, accel, gyro, imu_gap=gap)
-                            if detector.phase == Phase.WAITING_FOR_RELEASE and detector.release_candidate_at is None:
-                                estimator.constrain_waiting(accel)
+                            if settling:
+                                estimator.constrain_settling(accel)
+                            else:
+                                gyro = [readings['gyro_' + axis] for axis in 'xyz']
+                                estimator.predict(dt, accel, gyro, imu_gap=gap)
+                                if detector.phase == Phase.WAITING_FOR_RELEASE and detector.release_candidate_at is None:
+                                    estimator.constrain_waiting(accel)
                             last_estimate_at = elapsed
                             updated = True
-                        if 'pressure' in reader.updated_groups:
+                        if not settling and 'pressure' in reader.updated_groups:
                             estimator.update_pressure(readings['pressure'] * 100.0,
                                                       waiting=detector.release_at is None)
                             pressure_updated = estimator.pressure_updated
                             updated = updated or pressure_updated
-                        if 'landing' in events:
-                            estimator.confirm_landed()
-                            updated = True
+                        if detector.release_at is not None and not settling:
+                            estimator.constrain_descent(previous_displacement_m)
 
                     # Ground station events, sent as soon as they are detected
                     for name in events:
@@ -313,6 +317,8 @@ def run_live_drop(sense, output_path, downlink=None, settings=None, stop_request
                             next_csv_at = now + csv_period
                     if stream_due:
                         # Ground station telemetry: 20 Hz
+                        if finished:
+                            row['final'] = True
                         downlink.telemetry(elapsed, row, now, force=finished)
                 if finished:
                     break

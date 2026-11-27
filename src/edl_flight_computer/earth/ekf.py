@@ -9,6 +9,9 @@ class EKF:
 
     G = 9.80665
     SCALE_HEIGHT_M = 8434.5
+    # Short, vented drops. Stationary portions of the recorded tests varied by about 1–2 Pa.
+    PRESSURE_STD_PA = 2.0
+    STATIONARY_VELOCITY_STD_M_S = 0.03
 
     def __init__(self, up_body, gyro_bias, baseline_g=1.0, use_pressure=True):
         # Initial state at release
@@ -50,9 +53,12 @@ class EKF:
         Q[2, 2] += 0.02**2 * dt
         self.P = F @ self.P @ F.T + Q
 
-    def _correct(self, observed, predicted, H, variance):
+    def _correct(self, observed, predicted, H, variance, *, velocity_only=False):
         innovation_variance = float(H @ self.P @ H + variance)
         K = self.P @ H / innovation_variance
+        if velocity_only:
+            # Quiet IMU evidence constrains speed and leaves the held displacement and bias intact.
+            K[[0, 2]] = 0.0
         self.X += K * (observed - predicted)
         residual = np.eye(3) - np.outer(K, H)
         # Covariance correction
@@ -65,7 +71,16 @@ class EKF:
         if abs(np.linalg.norm(accel) - 1.0) < 0.1:
             self.up_body = accel / np.linalg.norm(accel)
         self._correct(0.0, self.X[0], np.array([1., 0., 0.]), 0.5**2)
-        self._correct(0.0, self.X[1], np.array([0., 1., 0.]), 0.03**2)
+        self._correct(0.0, self.X[1], np.array([0., 1., 0.]), self.STATIONARY_VELOCITY_STD_M_S**2)
+        self.X[:2] = 0.0
+
+    @property
+    def displacement_m(self):
+        return float(self.X[0])
+
+    def constrain_descent(self, previous_displacement_m):
+        """Apply the one-way Earth drop assumption after each sensor update."""
+        self.X[0] = min(self.X[0], previous_displacement_m)
 
     def update_pressure(self, pressure_pa, *, waiting=False):
         self.pressure_updated = False
@@ -82,12 +97,15 @@ class EKF:
         # Barometric measurement model
         predicted = self.reference_pressure_pa * np.exp(-self.X[0] / self.SCALE_HEIGHT_M)
         H = np.array([-predicted / self.SCALE_HEIGHT_M, 0., 0.])
-        self._correct(pressure_pa, predicted, H, 20.0**2)
+        self._correct(pressure_pa, predicted, H, self.PRESSURE_STD_PA**2)
         self.pressure_updated = True
 
-    def confirm_landed(self):
-        """Zero speed after independent landing confirmation."""
-        self._correct(0.0, self.X[1], np.array([0., 1., 0.]), 0.03**2)
+    def constrain_settling(self, accel_g):
+        """Use a weighted zero-velocity observation while the IMU remains quiet."""
+        accel = np.asarray(accel_g, dtype=float)
+        self.up_body = accel / np.linalg.norm(accel)
+        self._correct(0.0, self.X[1], np.array([0., 1., 0.]), self.STATIONARY_VELOCITY_STD_M_S**2,
+                      velocity_only=True)
 
     def snapshot(self):
         return dict(ekf_displacement_m=float(self.X[0]),

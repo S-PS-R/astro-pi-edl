@@ -1,5 +1,12 @@
 """Dark palette for the mission controls and Matplotlib figures."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from matplotlib.typing import RcKeyType
+
 BACKGROUND = '#10151e'
 PANEL = '#171f2b'
 BORDER = '#3b4b60'
@@ -8,7 +15,7 @@ MUTED = '#b2c1d3'
 ACCENT = '#65d9ef'
 TRACE_COLORS = (ACCENT, '#ffbd78', '#b9a1ff')
 
-DARK_PLOT_STYLE = {
+DARK_PLOT_STYLE: dict[RcKeyType, str] = {
     'figure.facecolor': BACKGROUND,
     'savefig.facecolor': BACKGROUND,
     'axes.facecolor': PANEL,

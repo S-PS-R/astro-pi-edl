@@ -541,3 +541,10 @@ class MissionTests(TestCase):
         self.assertEqual(detector.phase, Phase.LANDED)
         self.assertIn('landing', [row['phase'] for row in rows])
         self.assertNotIn('mach', rows[-1])
+        descent = [row for row in rows if row['phase'] in ('landing', 'landed')]
+        position = [float(row['ekf_displacement_m']) for row in descent]
+        self.assertTrue(all(b <= a for a, b in zip(position, position[1:])))
+        final_velocity = abs(float(rows[-1]['ekf_vertical_velocity_m_s']))
+        self.assertGreater(final_velocity, 0.0)
+        self.assertLess(final_velocity, 0.03)
+        self.assertEqual(rows[-1]['ekf_displacement_m'], rows[-2]['ekf_displacement_m'])

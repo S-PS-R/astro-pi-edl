@@ -15,8 +15,15 @@ import socket
 from time import monotonic, sleep
 
 from .downlink import DEFAULT_PORT, PROTOCOL_VERSION
+from .sensors import SENSOR_CHANNELS
 
 RUN_END_EVENTS = {'landing', 'impact', 'stopped', 'deployment_failed'}
+EARTH_LOG_INTERVAL_S = 0.1
+EARTH_LOG_FIELDS = (
+    'phase', 'accel_magnitude_g', 'gyro_magnitude_rad_s', *SENSOR_CHANNELS,
+    'ekf_displacement_m', 'ekf_vertical_velocity_m_s', 'ekf_displacement_std_m',
+    'ekf_velocity_std_m_s', 'faults',
+)
 
 # Status line fields: (telemetry key, label, format)
 STATUS_FIELDS = {
@@ -44,6 +51,7 @@ class RunLink:
         self.max_seq = -1
         self.event_ids = set()
         self.latest = None
+        self.last_logged_earth_sample = None
         self.last_heard = None
         self.finished = False
 
@@ -123,10 +131,31 @@ class GroundStation:
             if link.latest is not None and seq <= link.latest['seq']:
                 return None  # out of order
             link.latest = packet
-        if self.log is not None:
-            packet['received_at'] = datetime.now().isoformat(timespec='milliseconds')
-            self.log.write(json.dumps(packet, separators=(',', ':')) + '\n')
+        self._record_packet(packet, link)
         return packet
+
+    def _record_packet(self, packet, link, *, force=False):
+        if self.log is None:
+            return
+        if packet.get('mission') != 'earth':
+            packet['received_at'] = datetime.now().isoformat(timespec='milliseconds')
+            record = packet
+        elif packet['type'] == 'event':
+            data = {key: value for key, value in packet.get('data', {}).items()
+                    if key != 'ekf_accel_bias_m_s2'}
+            record = dict(packet, data=data)
+        else:
+            data = packet.get('data', {})
+            previous = link.last_logged_earth_sample
+            if packet is previous:
+                return
+            final = force or data.get('final') or data.get('phase') == 'landed'
+            if previous is not None and not final:
+                if packet['time_s'] < previous['time_s'] + EARTH_LOG_INTERVAL_S - 1e-9:
+                    return
+            link.last_logged_earth_sample = packet
+            record = dict(packet, data={key: data[key] for key in EARTH_LOG_FIELDS if key in data})
+        self.log.write(json.dumps(record, separators=(',', ':')) + '\n')
 
     def show_event(self, packet):
         if not self.echo:
@@ -168,6 +197,9 @@ class GroundStation:
     def close(self):
         self.socket.close()
         if self.log is not None:
+            for link in self.runs.values():
+                if link.latest is not None and link.latest.get('mission') == 'earth':
+                    self._record_packet(link.latest, link, force=True)
             self.log.close()
 
 
