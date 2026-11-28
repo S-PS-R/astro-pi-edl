@@ -67,15 +67,12 @@ class SnapshotBuffer:
 
 
 class TelemetryPlot:
-    def __init__(self, port):
-        from matplotlib import rc_context
-        import matplotlib.pyplot as plt
-        with rc_context(DARK_PLOT_STYLE):
-            self.figure = plt.figure(figsize=(12, 8), layout='constrained')
-            self.figure.suptitle(f'Waiting for telemetry on UDP port {port}')
+    def __init__(self, figure):
+        self.figure = figure
         self.run = None
         self.mission = None
         self.history = SnapshotBuffer()
+        self.landing = None
         self.axes = []
         self.dirty = False
 
@@ -112,15 +109,21 @@ class TelemetryPlot:
                 before_reset()
             self.run = run
             self.history = SnapshotBuffer()
+            self.landing = None
             if mission != self.mission:
                 self._build(mission)
         self.dirty |= self.history.ingest(time_s, data)
+
+    def confirm_landing(self, landing):
+        if landing is not self.landing:
+            self.landing = landing
+            self.dirty = True
 
     def draw(self):
         latest_sample = self.history.latest
         mission = self.mission
         if not self.dirty or latest_sample is None or mission is None:
-            return
+            return False
         self.dirty = False
         rows = list(self.history.rows)
         times = [time_s for time_s, _ in rows]
@@ -143,11 +146,36 @@ class TelemetryPlot:
 
         # Title
         time_s, latest = latest_sample
-        phase = latest.get('phase', '?')
+        phase = 'landed' if self.landing is not None else latest.get('phase', '?')
         if mission == 'earth':
             flight = latest.get('flight_elapsed_s')
+            if self.landing is not None:
+                flight_field = 'flight_time_s' if self.landing['type'] == 'event' else 'flight_elapsed_s'
+                flight = self.landing.get('data', {}).get(flight_field, flight)
             detail = 'waiting for release' if flight is None else f'flight {flight:.2f} s'
         else:
+            if self.landing is not None:
+                time_s = self.landing['time_s']
             detail = f'T+{time_s:.1f} s'
         self.figure.suptitle(f'{mission.upper()} — {self.run} — {phase} — {detail}',
                             color=DARK_PLOT_STYLE['text.color'])
+        return True
+
+
+def save_png(path, run, mission, rows, landing):
+    """Render a snapshot in the background process with no GUI backend."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    figure = Figure(figsize=(12, 8), layout='constrained', facecolor=DARK_PLOT_STYLE['figure.facecolor'])
+    FigureCanvasAgg(figure)
+    plot = TelemetryPlot(figure)
+    plot.run = run
+    plot._build(mission)
+    plot.history.rows.extend(rows)
+    plot.history.latest = rows[-1]
+    plot.confirm_landing(landing)
+    plot.dirty = True
+    plot.draw()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=150)

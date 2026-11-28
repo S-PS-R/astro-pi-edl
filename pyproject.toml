@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "matplotlib>=3.7", "Pillow>=11.2.1"]
 
+[project.optional-dependencies]
+gmail = ["google-auth-oauthlib>=1.2", "keyring>=25"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["sense_hat_emulator*", "edl_flight_computer*"]

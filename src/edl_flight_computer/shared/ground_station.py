@@ -1,4 +1,4 @@
-"""Ground station: python -m edl_flight_computer.shared.ground_station --port 8765
+"""Ground station: python -m edl_flight_computer.shared.ground_station
 
 Receives the UDP downlink from Earth drops (Pi) or the Mars simulator, prints
 critical events as they arrive, shows a once-per-second telemetry status line,
@@ -7,17 +7,22 @@ on the ground station.
 """
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 import json
+from multiprocessing import get_context
 from pathlib import Path
 import re
 import socket
 from time import monotonic, sleep
 
 from .downlink import DEFAULT_PORT, PROTOCOL_VERSION
+from .landing_email import LandingEmail
+from .live_plot import save_png
 from .sensors import SENSOR_CHANNELS
 
 RUN_END_EVENTS = {'landing', 'impact', 'stopped', 'deployment_failed'}
+FINAL_SAMPLE_WAIT_S = 0.5
 EARTH_LOG_INTERVAL_S = 0.1
 EARTH_LOG_FIELDS = (
     'phase', 'accel_magnitude_g', 'gyro_magnitude_rad_s', *SENSOR_CHANNELS,
@@ -54,6 +59,9 @@ class RunLink:
         self.last_logged_earth_sample = None
         self.last_heard = None
         self.finished = False
+        self.landing = None
+        self.landing_received_at = None
+        self.landing_email_queued = False
 
     @property
     def lost(self):
@@ -126,11 +134,20 @@ class GroundStation:
             link.event_ids.add(packet.get('event_id'))
             if packet.get('event') in RUN_END_EVENTS:
                 link.finished = True
+            if packet.get('mission') in ('earth', 'mars') and packet.get('event') == 'landing':
+                link.landing = packet
+                if link.landing_received_at is None:
+                    link.landing_received_at = link.last_heard
             self.show_event(packet)
         else:
             if link.latest is not None and seq <= link.latest['seq']:
                 return None  # out of order
             link.latest = packet
+            if packet.get('mission') in ('earth', 'mars') and packet.get('data', {}).get('phase') == 'landed':
+                link.finished = True
+                if link.landing is None:
+                    link.landing = packet
+                    link.landing_received_at = link.last_heard
         self._record_packet(packet, link)
         return packet
 
@@ -190,7 +207,9 @@ class GroundStation:
             parts.append('FAULT ' + ', '.join(data['faults']))
         total = link.received + link.lost
         parts.append(f'loss {100.0 * link.lost / total:.1f}%' if total else 'loss -')
-        if silent > 2.0:
+        if link.finished:
+            parts.append('RUN ENDED')
+        elif silent > 2.0:
             parts.append(f'NO SIGNAL {silent:.0f} s')
         return ' | '.join(parts)
 
@@ -203,14 +222,61 @@ class GroundStation:
             self.log.close()
 
 
+def save_run_report(path, run, mission, rows, landing, email):
+    """Save the PNG first, then send the landing report if enabled for this run."""
+    save_png(path, run, mission, rows, landing)
+    print(f'Saved downlink plot: {path}', flush=True)
+    if email is not None:
+        try:
+            refused = email.send(landing, path)
+        except (OSError, ValueError) as error:
+            print(f'Could not send landing email for {run}: {error}', flush=True)
+        else:
+            if refused:
+                print(f'Sent landing email for {run}. SMTP rejected: {", ".join(refused)}', flush=True)
+            else:
+                print(f'Sent landing email for {run}.', flush=True)
+
+
+def report_export_error(future):
+    error = future.exception()
+    if error is not None:
+        print(f'Could not complete downlink plot export: {error}', flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--port', type=int, default=DEFAULT_PORT)
+    parser.add_argument('--port', type=int, default=DEFAULT_PORT,
+                        help='UDP listening port (default: %(default)s)')
     parser.add_argument('--log', type=Path, default=None, help='JSONL packet log (default logs/ground_*.jsonl)')
     parser.add_argument('--no-log', action='store_true', help='do not record packets')
     parser.add_argument('--no-plot', action='store_true', help='console only, no plot window')
+    parser.add_argument('--check-email', action='store_true',
+                        help='check the email login without sending email or starting the receiver')
     args = parser.parse_args(argv)
+    email = None
+    if args.check_email or not args.no_plot:
+        from ..run import LANDING_EMAIL
+
+        try:
+            email = LandingEmail.from_settings(**LANDING_EMAIL)
+        except ValueError as error:
+            print(f'Landing email disabled: {error}', flush=True)
+            if args.check_email:
+                return 1
+
+    if args.check_email:
+        if email is None:
+            print('Set the sender and recipients in run.py before checking email.', flush=True)
+            return 1
+        try:
+            result = email.check()
+        except (OSError, ValueError) as error:
+            print(f'Email check failed: {error}', flush=True)
+            return 1
+        print(result, 'No email sent.', flush=True)
+        return 0
 
     session_path = args.log or default_log_path()
     log_path = None if args.no_log else session_path
@@ -219,33 +285,42 @@ def main(argv=None):
           'Allow Python through the laptop firewall on your private Wi-Fi network.', flush=True)
     if log_path is not None:
         print(f'Recording packets: {log_path}', flush=True)
+    if email is not None:
+        print(f'Landing email enabled for {len(email.recipients)} recipient(s).', flush=True)
     next_status = 0.0
     plot = None
+    exports = None
     plotted_run = 0
     saved_history = None
     saved_snapshot = None
+    saved_landing = None
 
     def save_plot():
-        nonlocal plotted_run, saved_history, saved_snapshot
+        nonlocal plotted_run, saved_history, saved_snapshot, saved_landing
         if plot is None or not plot.axes:
             return
         history = plot.history
-        if history.latest is None or history.latest is saved_snapshot:
+        link = station.runs[plot.run]
+        landing = link.landing
+        if history.latest is None or (history.latest is saved_snapshot and landing is saved_landing):
             return
         if history is not saved_history:
             plotted_run += 1
             saved_history = history
-        saved_snapshot = history.latest
+        saved_snapshot, saved_landing = history.latest, landing
         run_name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(plot.run))[:80]
         path = session_path.with_name(f'{session_path.stem}_plot_{plotted_run:02d}_{run_name}.png')
+        notification = None
+        if landing is not None and email is not None and not link.landing_email_queued:
+            notification = email
+            link.landing_email_queued = True
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            plot.draw()
-            plot.figure.savefig(path, dpi=150)
-        except OSError as error:
-            print(f'Could not save downlink plot: {error}', flush=True)
+            future = exports.submit(save_run_report, path, plot.run, plot.mission,
+                                    tuple(history.rows), landing, notification)
+        except RuntimeError as error:
+            print(f'Could not start downlink plot export: {error}', flush=True)
         else:
-            print(f'Saved downlink plot: {path}', flush=True)
+            future.add_done_callback(report_export_error)
 
     def service():
         # Receive, then report status once per second
@@ -253,9 +328,16 @@ def main(argv=None):
         for packet in station.poll():
             if plot is not None:
                 plot.add(packet, before_reset=save_plot)
-        if plot is not None and plot.run in station.runs and station.runs[plot.run].finished:
-            save_plot()
         now = monotonic()
+        link = station.runs.get(plot.run) if plot is not None else None
+        if link is not None and link.finished:
+            landing = link.landing
+            if landing is not None:
+                plot.confirm_landing(landing)
+            if (landing is None
+                    or (landing['type'] == 'event' and plot.history.latest[1].get('phase') == 'landed')
+                    or now - link.landing_received_at >= FINAL_SAMPLE_WAIT_S):
+                save_plot()
         if now >= next_status:
             print(station.status_line(), flush=True)
             next_status = now + 1.0
@@ -267,22 +349,34 @@ def main(argv=None):
                 sleep(0.02)
         else:
             import matplotlib.pyplot as plt
-            from matplotlib.animation import FuncAnimation
+            from matplotlib import rc_context
+            from .appearance import DARK_PLOT_STYLE
             from .live_plot import TelemetryPlot
 
-            plot = TelemetryPlot(args.port)
+            with rc_context(DARK_PLOT_STYLE):
+                figure = plt.figure(figsize=(12, 8), layout='constrained')
+                figure.suptitle(f'Waiting for telemetry on UDP port {args.port}')
+            plot = TelemetryPlot(figure)
+            exports = ProcessPoolExecutor(max_workers=1, mp_context=get_context('spawn'))
 
-            def refresh(_frame):
+            def refresh():
                 service()
-                plot.draw()
+                if plot.draw():
+                    figure.canvas.draw_idle()
 
-            animation = FuncAnimation(plot.figure, refresh, interval=50, cache_frame_data=False)
+            timer = figure.canvas.new_timer(interval=50)
+            timer.add_callback(refresh)
+            timer.start()
             plt.show()
     except KeyboardInterrupt:
         pass
     finally:
         station.close()
-        save_plot()
+        if exports is not None:
+            try:
+                save_plot()
+            finally:
+                exports.shutdown()
         print('Ground station stopped.')
     return 0
 

@@ -50,7 +50,7 @@ src/edl_flight_computer/
         sim.py, model.py, state.py, led_grid.py, status_window.py, plot_window.py
     shared/
         hardware.py, sensors.py, telemetry.py, phases.py,
-        downlink.py, ground_station.py, live_plot.py
+        downlink.py, ground_station.py, live_plot.py, landing_email.py
 ```
 
 The old flat module paths have been replaced by these package paths. The
@@ -73,6 +73,8 @@ remain unchanged.
 | `shared/telemetry.py` | CSV output |
 | `shared/downlink.py` | UDP telemetry and event packets to the ground station |
 | `shared/ground_station.py` | Laptop ground station: events, link status, packet log, live plots |
+| `shared/landing_email.py` | Landing report messages and SMTP delivery from the laptop |
+| `shared/gmail_email.py` | Gmail API delivery from the laptop over HTTPS |
 | `shared/live_plot.py` | Ground station's telemetry plots (visualization only) |
 
 ## Ground station downlink
@@ -111,10 +113,11 @@ stop the flight loop. The Pi's CSV remains the authoritative record.
 Start a ground station on the laptop before the run:
 
 ```sh
-python -m edl_flight_computer.shared.ground_station --port 8765
+python -m edl_flight_computer.shared.ground_station
 ```
 
-The terminal prints events as they arrive, with a landing banner, and a
+The ground station listens on UDP port 8765 by default. Use `--port` to
+override it. The terminal prints events as they arrive, with a landing banner, and a
 once-per-second status line showing key telemetry, packet loss, and `NO SIGNAL`
 after two silent seconds. A plot window (`shared/live_plot.py`) shows the
 telemetry: Earth sensor and vertical EKF panels for drops, and altitude, speed,
@@ -122,6 +125,9 @@ heat flux, load factor, and board pressure/temperature for Mars. The laptop save
 receives a run-ending event, switches to another run, or closes the plot window.
 The PNG shows the telemetry retained in the live plot. It is saved next to the
 packet log as `ground_<timestamp>_plot_<number>_<run>.png` by default.
+The station uses the landing event or a `landed` telemetry sample to confirm
+landing. It briefly waits for the landing event and final sample if needed,
+then saves the available plot in the background while the window stays open.
 The ground station appends events and telemetry to `logs/ground_<timestamp>.jsonl`.
 The Earth log stores the slim telemetry snapshot at up to 10 Hz, plus the final
 received sample and one record per event. Snapshots include phase, sensors,
@@ -131,6 +137,73 @@ Thinning creates sequence gaps in the Earth JSONL; the live link-loss display
 uses the incoming packets before thinning.
 `--log PATH` sets the location and filename prefix for both outputs.
 `--no-log` disables the packet log. `--no-plot` runs without a plot window or PNGs.
+
+### Ground station landing email
+
+On the downlink PC, edit `LANDING_EMAIL` near the top of
+`src/edl_flight_computer/run.py`. Use your email address or an alias your SMTP
+server allows. Include your own address in the recipient list if you want a copy.
+
+```python
+LANDING_EMAIL = {
+    'sender': 'you@example.com',
+    'recipients': ['you@example.com', 'teammate@example.com'],
+}
+```
+
+#### Gmail API over HTTPS
+
+1. Install the optional Gmail dependencies on the Windows downlink PC with
+   `python -m pip install -e ".[gmail]"`.
+2. In Google Cloud, enable the **Gmail API**. In **Google Auth Platform**,
+   configure an **External** app in **Testing** and add your personal Gmail
+   address as a test user. In **Data Access**, add the `gmail.send` scope.
+   Create a **Desktop app** OAuth client and download its JSON file.
+   [Google's desktop setup guide](https://developers.google.com/workspace/gmail/api/quickstart/python)
+3. Keep the JSON outside the repository. In `LANDING_EMAIL`, set
+   `gmail_client_file` to its path and `sender` to the Gmail test account.
+   For example, use `'C:/Users/you/Downloads/gmail-client.json'`.
+4. Run `python -m edl_flight_computer.shared.ground_station --check-email` and
+   approve Gmail sending in your browser. The check sends no email. It stores
+   the authorization in Windows Credential Manager. Google expires Testing
+   authorizations after seven days, so repeat the check before the demo.
+   [Google's token lifetime guidance](https://developers.google.com/identity/protocols/oauth2#expiration)
+
+#### Gmail SMTP
+
+Leave `gmail_client_file` blank to use Gmail SMTP. Set these environment
+variables on the downlink PC and use a Google app password.
+
+| Variable | Value |
+|---|---|
+| `EDL_SMTP_HOST` | `smtp.gmail.com` |
+| `EDL_SMTP_PORT` | Defaults to `587` with STARTTLS. Port `465` uses implicit TLS. |
+| `EDL_SMTP_USER`, `EDL_SMTP_PASSWORD` | Set both if the SMTP server requires authentication. Keep credentials out of the repository. |
+
+To verify the mail connection and sign-in before the demo, run this from the
+PowerShell window where you set the SMTP variables. The check sends no email
+and does not start the UDP receiver.
+
+```powershell
+python -m edl_flight_computer.shared.ground_station --check-email
+```
+
+#### Run the ground station
+
+Start the ground station after setting up Gmail:
+
+```powershell
+python -m edl_flight_computer.shared.ground_station
+```
+
+When the ground station receives a confirmed landing for either Earth or Mars,
+it saves the PNG and sends one email for that run. Earth emails include flight
+time through confirmation (including settling) and estimated vertical
+displacement from release. Mars emails include simulated touchdown time and,
+when available, touchdown speed and distance from the landing target. The Pi
+keeps its full-rate Earth flight CSV. The ground station prints the send result,
+and the PNG remains on disk if delivery fails. Runs without a receiving ground
+station generate no email.
 
 ## Fault detection
 
@@ -424,13 +497,14 @@ Install this package on the laptop, connect both devices to the same Wi-Fi, and
 start the ground station on the laptop:
 
 ```sh
-python -m edl_flight_computer.shared.ground_station --port 8765
+python -m edl_flight_computer.shared.ground_station
 ```
 
 Allow Python's UDP traffic on the laptop's private-network firewall. In the Pi's
 `run.py`, set `GROUND_STATION['host']` to the laptop's local Wi-Fi IPv4 address
 and keep `port = 8765` (or match the receiver's port). See
-[Ground station downlink](#ground-station-downlink).
+[Ground station downlink](#ground-station-downlink). For requirement 10, use the
+[Ground station landing email](#ground-station-landing-email) setup.
 
 The laptop plots acceleration, gyro, magnetometer, pressure, both temperatures,
 humidity, EKF displacement, and EKF vertical velocity. The plot title shows phase

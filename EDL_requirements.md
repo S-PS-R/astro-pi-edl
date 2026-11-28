@@ -20,4 +20,4 @@ Implementation and demo checklist
 - [x] 7. Detect an induced out-of-range sensor reading that lasts at least 0.5 seconds. Demonstrate the stimulus on the packaged board. Gyro fault thresholds are optional and disabled by default.
 - [x] 8. Report faults and clears over UDP and include active faults in telemetry. The response is reporting only.
 - [x] 9. Record accelerometer data during terminal descent using the Earth drop recorder. Use the physical drop CSV as demo evidence.
-- [ ] 10. Send a landing text, email, or social media post. The implemented UDP landing event reaches the ground station. It does not match the listed delivery channels.
+- [ ] 10. Demonstrate the landing email. When the downlink PC receives a confirmed Earth or Mars landing, it saves the plot and emails the PNG with landing metrics. Configure SMTP on the PC and verify delivery during the live demo.

@@ -16,6 +16,16 @@ dist/
 # Folders
 .tmp
 .pdfs
+.tests
 
 # emulator
 *.egg-info/
+
+# Local email credentials
+client_secret*.json
+gmail-client.json
+gmail-token.json
+token.json
+.env
+.env.*
+!.env.example

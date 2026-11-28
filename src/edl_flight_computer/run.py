@@ -1,6 +1,6 @@
 """Launch Earth recording (default) or the Mars simulation."""
 # Ground station (laptop): events, status, live plots (--no-plot for console only)
-# python -m edl_flight_computer.shared.ground_station --port 8765
+# python -m edl_flight_computer.shared.ground_station
 # python -m edl_flight_computer.run mars
 # python -m edl_flight_computer.run earth
 
@@ -16,6 +16,15 @@ GROUND_STATION = {
     # 10.0.0.88 sends to a ground station on the laptop (Pi flight) 
     'host': '10.0.0.88',
     'port': 8765,
+}
+
+# Landing email addresses used by the ground station. SMTP credentials come from the environment.
+LANDING_EMAIL = {
+    'gmail_client_file': 'C:\\GitHub\\client_secret_943355850148-hpvt08295k3l73idtr8n880lc85292p1.apps.googleusercontent.com.json',  # Path to Google's desktop OAuth client JSON to use Gmail over HTTPS.
+    'sender': 'samirpsrathore@gmail.com',
+    'recipients': ['sprathor@usc.edu', 'asiripur@usc.edu', 
+                   'qebarnes@usc.edu', 'pmbutler@usc.edu',
+                   'aywong@usc.edu', 'mwilson5@usc.edu']
 }
 
 # Fault detection: nominal (low, high) range per sensor channel; None = no limit.
