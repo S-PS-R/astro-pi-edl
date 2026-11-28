@@ -59,8 +59,8 @@ MARS_ENTRY_AREA_M2, _ = sphere_cone_areas(**MARS_AEROSHELL)
 # Mars initial conditions and descent settings
 MARS_SETTINGS = {
     'updates_per_sim_second': 3.0,
-    'time_scale': 1,
-    'telemetry_hz': 10.0,  # real-t`ime downlink rate; events are sent immediately
+    'time_scale': 10.0,
+    'telemetry_hz': 10.0,  # real-time downlink rate; events are sent immediately
     'ground_station': GROUND_STATION,
     'fault_limits': {
         **ENVIRONMENT_LIMITS,
